@@ -159,3 +159,20 @@ dialog input,dialog select{display:block;margin:6px 0 12px;width:100%}
 .cal.week .slot{gap:3px}
 #panel label[for=p-kind]{display:flex;gap:6px;align-items:center;font-size:.9rem;color:var(--ink);margin:12px 0}
 #panel input[type=checkbox]{width:18px;height:18px}
+
+/* long words with no spaces must wrap, never push the page sideways */
+body,dialog,#panel,#toast{overflow-wrap:anywhere}
+main,.card,.day,.cell,.task .main,.stats div,li{min-width:0}
+button,.prev .chip,.chip.due{white-space:normal;text-align:left}
+button.linklike{overflow-wrap:anywhere;max-width:100%}
+.chip{max-width:100%}
+html,body{max-width:100%;overflow-x:hidden}
+body.board-bg{overflow-x:hidden}
+/* confirm dialog, empty search, new-card flash */
+#confirm-lines{margin:.4em 0;padding-left:20px;font-weight:600}
+.nomatch{margin:8px 14px;padding:10px 14px;border-radius:10px;background:var(--card);box-shadow:var(--shadow)}
+.nomatch[hidden]{display:none}
+.bcard.flash{animation:flash 2s ease-out}
+@keyframes flash{0%,60%{box-shadow:0 0 0 4px var(--focus)}100%{box-shadow:var(--shadow)}}
+@media (prefers-reduced-motion:reduce){.bcard.flash{animation:none;outline:3px solid var(--focus)}}
+#confirm-lines{max-height:45vh;overflow-y:auto}

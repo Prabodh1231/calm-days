@@ -92,6 +92,9 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
 </form></dialog>
 <dialog id="now-dialog"><h2>What should I do now?</h2><div id="now-body"></div>
 <div class="row"><button id="now-open" type="button" class="primary" hidden>Open card</button><button id="now-done" type="button" hidden>Mark done</button><button id="now-close" type="button">Close</button></div></dialog>
+<dialog id="confirm-dialog" aria-labelledby="confirm-h"><h2 id="confirm-h">Please confirm</h2>
+<ul id="confirm-lines"></ul><p class="muted">Nothing has changed yet. It changes only if you press Approve.</p>
+<div class="row"><button id="confirm-ok" type="button" class="primary">Approve</button><button id="confirm-cancel" type="button">Cancel</button></div></dialog>
 <aside id="panel" aria-label="Card details" hidden></aside>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/static/app.js"></script>
@@ -103,6 +106,17 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
         plan_cur = plan_cur,
         bodycls = if active == "/" { "board-bg" } else { "" }
     )
+}
+
+/// "1 suggested change is waiting for your approval." / "3 suggested changes are waiting ..."
+pub fn pending_text(n: usize) -> String {
+    if n == 1 { "1 suggested change is waiting for your approval.".into() } else { format!("{n} suggested changes are waiting for your approval.") }
+}
+
+/// What the approval dialog on the board shows for one waiting change.
+pub fn confirm_json(c: &Change, now: NaiveDateTime) -> serde_json::Value {
+    let (title, lines) = change_lines(c, now);
+    serde_json::json!({ "title": title, "lines": lines })
 }
 
 /// Short due text for a card face: "Today, 5:00 PM", "Tomorrow", "Mon 30 Nov".
@@ -209,7 +223,7 @@ pub fn board_page(board: &str, lists: &[ListRow], cards: &[Item], pending: usize
     cols.push_str("<section class=\"list addlist\"><button type=\"button\" id=\"addlist-open\">+ Add another list</button><form id=\"addlist-form\" hidden><input id=\"addlist-name\" type=\"text\" maxlength=\"60\" placeholder=\"List name\" aria-label=\"New list name\"><div class=\"row\"><button type=\"submit\" class=\"primary\">Add list</button><button type=\"button\" id=\"addlist-cancel\">Cancel</button></div></form></section>");
     let label_opts: String = LABEL_NAMES.iter().map(|l| format!("<option value=\"{l}\">{l}</option>")).collect();
     let proposals = if pending > 0 {
-        format!("<p class=\"notice\"><a href=\"/plan\">{pending} suggested change(s) are waiting for your approval.</a></p>")
+        format!("<p class=\"notice\">{} <a href=\"/plan\">{}</a></p>", pending_text(pending), if pending == 1 { "Review it" } else { "Review them" })
     } else {
         String::new()
     };
@@ -223,8 +237,9 @@ pub fn board_page(board: &str, lists: &[ListRow], cards: &[Item], pending: usize
 <select id="f-label" aria-label="Filter by label"><option value="">All labels</option>{label_opts}</select>
 <select id="f-due" aria-label="Filter by due date"><option value="">Any due date</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="week">Due in 7 days</option><option value="none">No due date</option></select>
 <button type="button" id="f-clear">Clear</button><span id="f-count" class="muted" aria-live="polite"></span></div>
-<p class="intro">Drag cards between lists. Add a card by typing a plain sentence. Smart text reading, works offline: it follows simple rules and is not an AI, so check the preview. Numeric dates are day-first: 12/11 means 12 November.</p>
+<p class="intro">Type a sentence like &#39;call John tomorrow at 5 PM&#39; in any + Add a card box. Dates like 12/11 mean 12 November.</p>
 {proposals}{welcome}
+<div id="nomatch" class="nomatch" hidden><b>No cards match.</b> <button type="button" id="nm-clear">Clear</button></div>
 <div class="board" id="board" data-lists="{lj}">{cols}</div>"##,
         lj = esc(&lists_json),
     );
@@ -340,7 +355,7 @@ pub fn change_lines(c: &Change, now: NaiveDateTime) -> (String, Vec<String>) {
             "Move cards".into(),
             moves.iter().map(|m| format!("Move \"{}\" from {} to {}", m.title, m.from_list, m.to_list)).collect(),
         ),
-        Change::ArchiveList { name, cards, .. } => ("Archive list".into(), vec![format!("Archive the list \"{name}\" and its {cards} card(s)")]),
+        Change::ArchiveList { name, cards, .. } => ("Archive list".into(), vec![format!("Archive the list \"{name}\" and its {cards} card{}", if *cards == 1 { "" } else { "s" })]),
         Change::Delete { titles, .. } => ("Delete".into(), titles.iter().map(|t| format!("Delete \"{t}\"")).collect()),
         Change::EditFuture { title, priority, id } => {
             let mut l = vec![format!("Change all future repeats of item #{id}")];
@@ -387,8 +402,9 @@ pub fn plan_page(board: &str, pending: &[(i64, Change)], undo: &[UndoRow], now: 
         format!("<ul class=\"log\">{li}</ul>")
     };
     let body = format!(
-        r#"<h1>Daily planner</h1>
-<p class="lead">The planner only makes suggestions. <b>Nothing changes until you press Approve.</b></p>
+        r#"<p><a class="btn" href="/">Back to board</a></p>
+<h1>Daily planner</h1>
+<p class="lead">The planner only makes suggestions. <b>Everything under "Waiting for your approval" is waiting for you. Nothing changes until you press Approve.</b></p>
 <section class="card"><div class="row"><button id="plan-day" type="button" class="primary">Plan my day</button><button id="plan-missed" type="button">Reschedule missed tasks</button></div>
 <p class="muted">How it chooses: higher priority and nearer deadlines go first. Each task gets the earliest free gap between 9:00 AM and 6:00 PM in the next 7 days. It never lands on top of a fixed event.</p></section>
 <h2>Waiting for your approval</h2>{props}
@@ -561,8 +577,8 @@ mod tests {
         assert!(html.contains("Load sample board"));
         assert!(html.contains("+ Add a card"));
         assert!(html.contains("Remind me to call John tomorrow at 5 PM"));
-        assert!(html.contains("Smart text reading, works offline"));
-        assert!(html.contains("day-first"));
+        assert!(html.contains("Type a sentence like"));
+        assert!(html.contains("12/11 mean 12 November"));
         assert!(html.contains("+ Add another list"));
         assert!(!html.to_lowercase().contains("ai understands"));
     }
@@ -592,5 +608,28 @@ mod tests {
         let v = insights(2, 10, 6, 3, 1, Some((now().date(), 4)), now().date());
         assert!(v.iter().any(|s| s.contains("busy")));
         assert!(v.iter().any(|s| s.contains("high priority")));
+    }
+
+    #[test]
+    fn pending_banner_is_plural_correct_and_links() {
+        assert_eq!(pending_text(1), "1 suggested change is waiting for your approval.");
+        assert_eq!(pending_text(3), "3 suggested changes are waiting for your approval.");
+        let h1 = board_page("b", &lists("To do"), &[], 1, now());
+        assert!(h1.contains("1 suggested change is waiting") && h1.contains("Review it</a>") && !h1.contains("(s)"));
+        let h2 = board_page("b", &lists("To do"), &[], 2, now());
+        assert!(h2.contains("2 suggested changes are waiting") && h2.contains("Review them</a>"));
+    }
+
+    #[test]
+    fn approval_dialog_and_planner_page_are_plain() {
+        let board = board_page("b", &lists("To do"), &[], 0, now());
+        assert!(board.contains("id=\"confirm-dialog\"") && board.contains("Please confirm") && board.contains(">Approve<") && board.contains(">Cancel<"));
+        assert!(board.contains("No cards match") && board.contains("id=\"nm-clear\""));
+        let a = Change::ArchiveList { id: 1, name: "Doing".into(), cards: 4 };
+        assert_eq!(confirm_json(&a, now())["lines"][0], "Archive the list \"Doing\" and its 4 cards");
+        let one = Change::ArchiveList { id: 1, name: "Doing".into(), cards: 1 };
+        assert_eq!(confirm_json(&one, now())["lines"][0], "Archive the list \"Doing\" and its 1 card");
+        let plan = plan_page("b", &[(1, a)], &[], now());
+        assert!(plan.contains("Back to board") && plan.contains("waiting for you"));
     }
 }

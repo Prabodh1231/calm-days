@@ -73,6 +73,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/api/delete", post(api_delete))
         .route("/api/move", post(api_move))
         .route("/api/plan", post(api_plan))
+        .route("/api/proposals/:id", get(api_proposal))
         .route("/api/proposals/:id/approve", post(api_approve))
         .route("/api/proposals/:id/cancel", post(api_cancel))
         .route("/api/undo", post(api_undo))
@@ -416,6 +417,14 @@ async fn api_plan(State(s): State<Shared>, Json(r): Json<PlanReq>) -> ApiRes {
     }
 }
 
+/// The plain-words question for the approval dialog on the board.
+async fn api_proposal(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
+    let (c, status) = lock(&s).get_proposal(id).map_err(bad)?.ok_or_else(|| bad("That suggestion no longer exists."))?;
+    if status != "pending" {
+        return Err(bad("That suggestion was already answered."));
+    }
+    Ok(Json(view::confirm_json(&c, now_local())))
+}
 async fn api_approve(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
     let u = ops::approve(&lock(&s), id, now_local()).map_err(bad)?;
     Ok(outcome(Outcome::Applied(u), "Approved and applied."))

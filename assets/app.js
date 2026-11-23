@@ -65,6 +65,12 @@
     });
     var active = text || lab || due;
     $('#f-count').textContent = active ? shown + ' of ' + total + ' cards shown' : '';
+    $$('.cards[data-list]').forEach(function (cont) {
+      var n = $$('.bcard', cont).filter(function (c) { return !c.hidden; }).length;
+      var cnt = $('.count', cont.parentNode);
+      if (cnt) { cnt.textContent = n; cnt.setAttribute('aria-label', n + (n === 1 ? ' card' : ' cards')); }
+    });
+    var nm = $('#nomatch'); if (nm) { nm.hidden = !(active && total > 0 && shown === 0); }
   }
 
   // Re-read the page from the server and swap the main area (the panel and toast stay).
@@ -82,7 +88,9 @@
     }).catch(fail);
   }
   function handle(res) {
-    if (res.status === 'proposal') {
+    if (res.status === 'proposal' && location.pathname !== '/plan') {
+      return confirmProposal(res.proposal);
+    } else if (res.status === 'proposal') {
       sessionStorage.setItem('toast', JSON.stringify({ msg: res.message, undo: 0 }));
       location.href = '/plan';
     } else if (res.status === 'none') {
@@ -91,6 +99,28 @@
       return refresh(res.message, res.undo);
     }
   }
+
+  // ---- approval question, shown on the page the user is on ----
+  var cfDlg = $('#confirm-dialog'), cfId = null;
+  function confirmProposal(pid) {
+    return api('/api/proposals/' + pid).then(function (r) {
+      cfId = pid;
+      var ul = $('#confirm-lines'); ul.textContent = '';
+      r.lines.forEach(function (l) { ul.appendChild(el('li', { text: l })); });
+      openDlg(cfDlg);
+      $('#confirm-ok').focus();
+    }).catch(fail);
+  }
+  function cancelProposal() {
+    var id = cfId; cfId = null; closeDlg(cfDlg);
+    if (id) { api('/api/proposals/' + id + '/cancel', {}).then(function (r) { toast(r.message); refresh(); }).catch(fail); }
+  }
+  $('#confirm-cancel').addEventListener('click', cancelProposal);
+  cfDlg.addEventListener('cancel', function (e) { e.preventDefault(); cancelProposal(); });
+  $('#confirm-ok').addEventListener('click', function () {
+    var id = cfId; cfId = null; closeDlg(cfDlg);
+    if (id) { api('/api/proposals/' + id + '/approve', {}).then(handle).catch(fail); }
+  });
 
   // ---- theme ----
   var themeBtn = $('#theme');
@@ -156,7 +186,7 @@
     if (p.date) { add('Due ' + fmtDate(p)); } else { add('No date found', 'warnchip'); }
     add('Priority: ' + PRI[p.priority]);
     if (p.repeat) { add('Repeats: ' + p.repeat); }
-    if (p.reminder_min === -1) { add('No reminder'); } else if (p.date) { add(p.reminder_min === null ? 'Reminder: default' : 'Reminder: ' + p.reminder_min + ' min before'); }
+    if (p.reminder_min === -1) { add('No reminder'); } else if (p.date) { add(p.reminder_text || 'Reminder: 10 min before'); }
     if (p.kind === 'event') { add('Fixed event'); }
     (p.notes || []).forEach(function (n) { add(n, 'warnchip'); });
     form._parsed = p;
@@ -175,7 +205,12 @@
       title: p.title, date: p.date, time: p.time, priority: p.priority, reminder_min: p.reminder_min,
       repeat: p.repeat || null, until: p.until, dur_min: p.dur_min, kind: p.kind,
       list_id: parseInt($('.add-open', form.parentNode).dataset.list, 10)
-    }).then(function (r) { refresh('Card added.', r.undo); }).catch(fail);
+    }).then(function (r) {
+      return refresh('Card added.', r.undo).then(function () {
+        var c = $('.bcard[data-id="' + r.id + '"]');
+        if (c) { c.scrollIntoView({ block: 'nearest', inline: 'nearest' }); c.classList.add('flash'); setTimeout(function () { c.classList.remove('flash'); }, 2200); }
+      });
+    }).catch(fail);
   }
   function closeAdder(form) {
     form.hidden = true; form._parsed = null;
@@ -390,7 +425,7 @@
       } else if (c.contains('cancel')) { api('/api/proposals/' + b.dataset.pid + '/cancel', {}).then(function (r) { toast(r.message); location.reload(); }).catch(fail);
       } else if (c.contains('undo')) { api('/api/undo', { id: parseInt(b.dataset.uid, 10) }).then(function () { location.reload(); }).catch(fail);
       } else if (b.id === 'sample') { api('/api/sample', {}).then(handle).catch(fail);
-      } else if (b.id === 'f-clear') { $('#q').value = ''; $('#f-label').value = ''; $('#f-due').value = ''; applyFilter();
+      } else if (b.id === 'f-clear' || b.id === 'nm-clear') { $('#q').value = ''; $('#f-label').value = ''; $('#f-due').value = ''; applyFilter();
       } else if (b.id === 'plan-day') { api('/api/plan', { missed: false }).then(handle).catch(fail);
       } else if (b.id === 'plan-missed') { api('/api/plan', { missed: true }).then(handle).catch(fail);
       } else if (b.id === 'notify') {

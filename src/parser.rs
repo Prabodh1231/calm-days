@@ -43,6 +43,19 @@ impl Parsed {
             "dur_min": self.dur_min,
             "kind": if self.is_event { "event" } else { "task" },
             "notes": self.notes,
+            "reminder_text": self.reminder_text(),
+        })
+    }
+
+    /// Plain words for the reminder chip. None when there is no date, so nothing can fire.
+    pub fn reminder_text(&self) -> Option<String> {
+        self.date?;
+        Some(match (self.reminder_min, self.time.is_some()) {
+            (Some(-1), _) => "No reminder".into(),
+            (None, true) => "Reminder: 10 min before".into(),
+            (None, false) => "Reminder: 9:00 AM that day".into(),
+            (Some(n), true) => format!("Reminder: {n} min before"),
+            (Some(n), false) => format!("Reminder: {n} min before 9:00 AM"),
         })
     }
 }
@@ -1070,5 +1083,13 @@ mod tests {
             }
             let _ = parse(&s, now());
         }
+    }
+
+    #[test]
+    fn reminder_text_says_when() {
+        let now = NaiveDate::from_ymd_opt(2026, 11, 23).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        assert_eq!(parse("call John tomorrow at 5 PM", now).reminder_text().as_deref(), Some("Reminder: 10 min before"));
+        assert_eq!(parse("pay rent tomorrow", now).reminder_text().as_deref(), Some("Reminder: 9:00 AM that day"));
+        assert_eq!(parse("buy milk", now).reminder_text(), None);
     }
 }
