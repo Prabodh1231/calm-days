@@ -1,8 +1,8 @@
 //! Everything that changes the calendar. Every change goes through the approval gate here.
-use crate::approval::{needs_approval, Change, Mv};
+use crate::approval::{needs_approval, CardMove, Change, Mv};
 use crate::planner::{self, Cand, DEFAULT_HOURS};
 use crate::repeat::{self, Repeat};
-use crate::store::{from_utc, to_utc, Db, Item, Undo};
+use crate::store::{from_utc, to_utc, Check, Db, Item, ListRow, Undo, LABELS};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 
 pub type Res<T> = Result<T, String>;
@@ -51,7 +51,19 @@ fn undo_push(db: &Db, desc: &str, u: &Undo, now: NaiveDateTime) -> Res<i64> {
     db.add_undo(desc, u, to_utc(now)).map_err(e)
 }
 
+/// The list new cards land in: the first list that is not archived and not a Done list.
+pub fn default_list(db: &Db) -> Res<i64> {
+    let ls = db.lists(false).map_err(e)?;
+    ls.iter().find(|l| !l.done_list).or(ls.first()).map(|l| l.id).ok_or_else(|| "There is no list to put the card in.".to_string())
+}
+
 pub fn create(db: &Db, n: &NewItem, sample: bool) -> Res<Item> {
+    let list = default_list(db)?;
+    create_in(db, n, sample, list)
+}
+
+pub fn create_in(db: &Db, n: &NewItem, sample: bool, list_id: i64) -> Res<Item> {
+    let list = db.get_list(list_id).map_err(e)?.filter(|l| !l.archived).ok_or("That list no longer exists.")?;
     let title = n.title.trim();
     if title.is_empty() {
         return Err("Please type a title.".into());
@@ -78,49 +90,267 @@ pub fn create(db: &Db, n: &NewItem, sample: bool) -> Res<Item> {
         acked: false,
         repeat,
         until: n.until,
-        done: false,
+        done: list.done_list,
         sample,
+        list_id,
+        pos: db.cards_in(list_id).map_err(e)?.len() as i64,
+        notes: String::new(),
+        labels: String::new(),
+        checklist: Vec::new(),
+        archived: false,
     };
     it.id = db.insert(&it).map_err(e)?;
     Ok(it)
 }
 
-/// Mark done. A repeating item moves to its next date; the finished one is counted in `completions`.
+/// Mark done = move the card to the Done list.
 pub fn complete(db: &Db, id: i64, now: NaiveDateTime) -> Res<i64> {
-    let mut it = db.get(id).map_err(e)?.ok_or("That task no longer exists.")?;
+    let it = db.get(id).map_err(e)?.ok_or("That task no longer exists.")?;
     if it.done {
         return Err("Already done.".into());
     }
-    let before = it.clone();
-    let cid = db.add_completion(&it.title, it.priority, to_utc(now)).map_err(e)?;
-    let mut finished = true;
-    if let (Some(rule), Some(a)) = (it.repeat.clone(), it.at_local()) {
-        let mut next = repeat::next_date(&rule, a.date(), it.until);
-        let mut guard = 0;
-        while let Some(d) = next {
-            let stale = if it.has_time { d.and_time(a.time()) <= now } else { d < now.date() };
-            if !stale || guard > 4000 {
-                break;
-            }
-            guard += 1;
-            next = repeat::next_date(&rule, d, it.until);
-        }
-        if let Some(d) = next {
-            let na = d.and_time(a.time());
-            it.at = Some(to_utc(na));
-            it.deadline = Some(if it.has_time { to_utc(na) } else { to_utc(d.and_hms_opt(23, 59, 59).unwrap_or(na)) });
-            it.fired = false;
-            it.acked = false;
-            it.remind_at = remind_at_for(Some(na), it.has_time, it.reminder_min);
-            finished = false;
-        }
-    }
-    it.done = finished;
-    db.put(&it).map_err(e)?;
-    let u = Undo { restore: vec![before], remove_items: vec![], remove_completions: vec![cid] };
-    undo_push(db, &format!("Done: {}", it.title), &u, now)
+    let done = db.lists(false).map_err(e)?.into_iter().find(|l| l.done_list).ok_or("There is no Done list. Add one by renaming a list.")?;
+    place_cards(db, &[(id, done.id, None)], now)
 }
 
+/// The next copy of a repeating card, ready to insert, or None when the series ends.
+fn next_copy(it: &Item, now: NaiveDateTime) -> Option<Item> {
+    let rule = it.repeat.clone()?;
+    let a = it.at_local()?;
+    let mut next = repeat::next_date(&rule, a.date(), it.until);
+    let mut guard = 0;
+    while let Some(d) = next {
+        let stale = if it.has_time { d.and_time(a.time()) <= now } else { d < now.date() };
+        if !stale || guard > 4000 {
+            break;
+        }
+        guard += 1;
+        next = repeat::next_date(&rule, d, it.until);
+    }
+    let d = next?;
+    let na = d.and_time(a.time());
+    let mut c = it.clone();
+    c.id = 0;
+    c.done = false;
+    c.at = Some(to_utc(na));
+    c.deadline = Some(if it.has_time { to_utc(na) } else { to_utc(d.and_hms_opt(23, 59, 59).unwrap_or(na)) });
+    c.fired = false;
+    c.acked = false;
+    c.remind_at = remind_at_for(Some(na), it.has_time, it.reminder_min);
+    c.checklist.iter_mut().for_each(|x| x.d = false);
+    Some(c)
+}
+
+/// Put cards into lists at a place (None = the end). One undo entry covers everything it touched.
+/// A card entering a Done list is finished; a repeating one then spawns its next copy in the first
+/// open list. A card leaving a Done list is open again.
+pub fn place_cards(db: &Db, moves: &[(i64, i64, Option<usize>)], now: NaiveDateTime) -> Res<i64> {
+    let mut u = Undo::default();
+    let mut touched: Vec<i64> = Vec::new();
+    for (id, to, _) in moves {
+        let it = db.get(*id).map_err(e)?.ok_or("That card no longer exists.")?;
+        for l in [it.list_id, *to] {
+            if !touched.contains(&l) {
+                touched.push(l);
+            }
+        }
+    }
+    for l in &touched {
+        u.restore.extend(db.cards_in(*l).map_err(e)?);
+    }
+    for (id, to, index) in moves {
+        let target = db.get_list(*to).map_err(e)?.filter(|l| !l.archived).ok_or("That list no longer exists.")?;
+        let mut it = db.get(*id).map_err(e)?.ok_or("That card no longer exists.")?;
+        let from = it.list_id;
+        let mut order: Vec<i64> = db.cards_in(target.id).map_err(e)?.iter().map(|c| c.id).filter(|c| c != id).collect();
+        let at = index.unwrap_or(order.len()).min(order.len());
+        order.insert(at, *id);
+        let was_done = it.done;
+        it.list_id = target.id;
+        it.done = target.done_list;
+        if it.done && !was_done {
+            let cid = db.add_completion(&it.title, it.priority, to_utc(now)).map_err(e)?;
+            u.remove_completions.push(cid);
+            if let Some(mut copy) = next_copy(&it, now) {
+                let home = default_list(db)?;
+                copy.list_id = home;
+                copy.pos = db.cards_in(home).map_err(e)?.len() as i64;
+                copy.sample = false;
+                u.remove_items.push(db.insert(&copy).map_err(e)?);
+                it.repeat = None; // the series lives on in the copy
+            }
+        }
+        db.put(&it).map_err(e)?;
+        db.renumber(&order, target.id).map_err(e)?;
+        if from != target.id {
+            let rest: Vec<i64> = db.cards_in(from).map_err(e)?.iter().map(|c| c.id).collect();
+            db.renumber(&rest, from).map_err(e)?;
+        }
+    }
+    let desc = if moves.len() == 1 {
+        let c = db.get(moves[0].0).map_err(e)?;
+        format!("Moved: {}", c.map(|c| c.title).unwrap_or_default())
+    } else {
+        format!("Moved {} cards", moves.len())
+    };
+    undo_push(db, &desc, &u, now)
+}
+
+fn card_move(db: &Db, id: i64, to: i64, index: Option<usize>) -> Res<CardMove> {
+    let it = db.get(id).map_err(e)?.ok_or("That card no longer exists.")?;
+    let from = db.get_list(it.list_id).map_err(e)?.map(|l| l.name).unwrap_or_default();
+    let target = db.get_list(to).map_err(e)?.filter(|l| !l.archived).ok_or("That list no longer exists.")?;
+    Ok(CardMove { id, title: it.title, from_list: from, to_list: target.name, to_list_id: to, index })
+}
+
+/// A drag or "Move to...": one card is applied (with Undo); three or more wait for Approve.
+pub fn submit_card_moves(db: &Db, moves: &[(i64, i64, Option<usize>)], now: NaiveDateTime) -> Res<Outcome> {
+    if moves.is_empty() {
+        return Err("Nothing to move.".into());
+    }
+    let mut cm = Vec::new();
+    for (id, to, index) in moves {
+        cm.push(card_move(db, *id, *to, *index)?);
+    }
+    dispatch(db, Change::MoveCards { moves: cm }, now)
+}
+
+/// Move every card of one list to the end of another.
+pub fn submit_move_all(db: &Db, from: i64, to: i64, now: NaiveDateTime) -> Res<Outcome> {
+    if from == to {
+        return Err("Pick a different list.".into());
+    }
+    let ids: Vec<(i64, i64, Option<usize>)> = db.cards_in(from).map_err(e)?.iter().map(|c| (c.id, to, None)).collect();
+    if ids.is_empty() {
+        return Err("That list has no cards.".into());
+    }
+    submit_card_moves(db, &ids, now)
+}
+
+pub fn submit_archive_list(db: &Db, id: i64, now: NaiveDateTime) -> Res<Outcome> {
+    let l = db.get_list(id).map_err(e)?.filter(|l| !l.archived).ok_or("That list no longer exists.")?;
+    let all = db.lists(false).map_err(e)?;
+    if all.len() <= 1 {
+        return Err("Keep at least one list on the board.".into());
+    }
+    if l.done_list && all.iter().filter(|x| x.done_list).count() <= 1 {
+        return Err("Keep one Done list, so finishing a card still has a place to go.".into());
+    }
+    if !l.done_list && all.iter().filter(|x| !x.done_list).count() <= 1 {
+        return Err("Keep at least one open list for new cards.".into());
+    }
+    let cards = db.cards_in(id).map_err(e)?.len();
+    dispatch(db, Change::ArchiveList { id, name: l.name, cards }, now)
+}
+
+fn clean_name(name: &str) -> Res<String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("Please type a name.".into());
+    }
+    if n.chars().count() > 60 {
+        return Err("That name is too long (60 letters at most).".into());
+    }
+    Ok(n.to_string())
+}
+
+pub fn add_list(db: &Db, name: &str, now: NaiveDateTime) -> Res<i64> {
+    let name = clean_name(name)?;
+    let pos = db.lists(true).map_err(e)?.iter().map(|l| l.pos).max().unwrap_or(-1) + 1;
+    let id = db.put_list(&ListRow { id: 0, name: name.clone(), pos, archived: false, done_list: false }).map_err(e)?;
+    undo_push(db, &format!("Added list: {name}"), &Undo { remove_lists: vec![id], ..Undo::default() }, now)
+}
+
+pub fn rename_list(db: &Db, id: i64, name: &str, now: NaiveDateTime) -> Res<i64> {
+    let name = clean_name(name)?;
+    let mut l = db.get_list(id).map_err(e)?.ok_or("That list no longer exists.")?;
+    let before = l.clone();
+    l.name = name;
+    db.put_list(&l).map_err(e)?;
+    undo_push(db, &format!("Renamed list: {}", l.name), &Undo { restore_lists: vec![before], ..Undo::default() }, now)
+}
+
+/// Put a list at a place among the open lists (0 = first).
+pub fn move_list(db: &Db, id: i64, index: usize, now: NaiveDateTime) -> Res<i64> {
+    let lists = db.lists(false).map_err(e)?;
+    let l = lists.iter().find(|l| l.id == id).ok_or("That list no longer exists.")?.clone();
+    let mut order: Vec<ListRow> = lists.iter().filter(|x| x.id != id).cloned().collect();
+    let at = index.min(order.len());
+    order.insert(at, l.clone());
+    let mut u = Undo { restore_lists: lists.clone(), ..Undo::default() };
+    for (i, x) in order.iter_mut().enumerate() {
+        x.pos = i as i64;
+        db.put_list(x).map_err(e)?;
+    }
+    u.restore_lists.retain(|x| order.iter().any(|y| y.id == x.id));
+    undo_push(db, &format!("Moved list: {}", l.name), &u, now)
+}
+
+pub fn archive_card(db: &Db, id: i64, now: NaiveDateTime) -> Res<i64> {
+    let mut it = db.get(id).map_err(e)?.ok_or("That card no longer exists.")?;
+    let before = it.clone();
+    it.archived = true;
+    db.put(&it).map_err(e)?;
+    undo_push(db, &format!("Archived: {}", it.title), &Undo { restore: vec![before], ..Undo::default() }, now)
+}
+
+/// Everything the card panel can change. The panel always sends the whole form.
+#[derive(Clone, Debug)]
+pub struct CardForm {
+    pub title: String,
+    pub notes: String,
+    pub priority: i64,
+    pub labels: Vec<String>,
+    pub checklist: Vec<Check>,
+    pub date: Option<NaiveDate>,
+    pub time: Option<NaiveTime>,
+    pub reminder_min: Option<i64>,
+    pub repeat: Option<Repeat>,
+    pub until: Option<NaiveDate>,
+    pub is_event: bool,
+    pub dur_min: i64,
+}
+
+pub fn update_card(db: &Db, id: i64, f: &CardForm, now: NaiveDateTime) -> Res<i64> {
+    let mut it = db.get(id).map_err(e)?.ok_or("That card no longer exists.")?;
+    let before = it.clone();
+    let title = f.title.trim();
+    if title.is_empty() {
+        return Err("Please type a title.".into());
+    }
+    if title.chars().count() > crate::parser::MAX_TITLE_CHARS {
+        return Err("That title is too long (200 letters at most).".into());
+    }
+    if f.notes.chars().count() > 5000 {
+        return Err("The notes are too long (5000 letters at most).".into());
+    }
+    if f.checklist.len() > 100 || f.checklist.iter().any(|c| c.t.chars().count() > 200) {
+        return Err("The checklist is too long.".into());
+    }
+    let has_time = f.date.is_some() && f.time.is_some();
+    let at_local = f.date.map(|d| d.and_time(f.time.unwrap_or_default()));
+    it.title = title.to_string();
+    it.notes = f.notes.clone();
+    it.priority = f.priority.clamp(0, 2);
+    it.labels = LABELS.iter().filter(|l| f.labels.iter().any(|x| x == *l)).cloned().collect::<Vec<_>>().join(",");
+    it.checklist = f.checklist.iter().filter(|c| !c.t.trim().is_empty()).map(|c| Check { t: c.t.trim().to_string(), d: c.d }).collect();
+    it.kind = if f.is_event { "event" } else { "task" }.into();
+    it.dur_min = f.dur_min.clamp(5, 24 * 60);
+    it.until = f.until;
+    it.repeat = if f.date.is_some() { f.repeat.clone() } else { None };
+    it.reminder_min = f.reminder_min;
+    let new_at = at_local.map(to_utc);
+    if new_at != it.at || has_time != it.has_time || f.reminder_min != before.reminder_min {
+        it.fired = false;
+        it.acked = false;
+    }
+    it.at = new_at;
+    it.has_time = has_time;
+    it.deadline = at_local.and_then(|a| if has_time { Some(a) } else { a.date().and_hms_opt(23, 59, 59) }).map(to_utc);
+    it.remind_at = remind_at_for(at_local, has_time, f.reminder_min);
+    db.put(&it).map_err(e)?;
+    undo_push(db, &format!("Edited: {}", it.title), &Undo { restore: vec![before], ..Undo::default() }, now)
+}
 fn day_has_fixed_event(items: &[Item], skip: i64, day: NaiveDate) -> bool {
     items.iter().any(|x| x.is_event() && !x.done && x.id != skip && x.at_local().map_or(false, |a| a.date() == day))
 }
@@ -212,6 +442,17 @@ fn apply_moves(db: &Db, moves: &[Mv], auto: bool, now: NaiveDateTime) -> Res<i64
 /// Write a change. Callers must have passed the gate (or have an approved proposal).
 fn apply(db: &Db, change: &Change, now: NaiveDateTime) -> Res<i64> {
     match change {
+        Change::MoveCards { moves } => {
+            let m: Vec<(i64, i64, Option<usize>)> = moves.iter().map(|m| (m.id, m.to_list_id, m.index)).collect();
+            place_cards(db, &m, now)
+        }
+        Change::ArchiveList { id, name, .. } => {
+            let mut l = db.get_list(*id).map_err(e)?.ok_or("That list no longer exists.")?;
+            let before = l.clone();
+            l.archived = true;
+            db.put_list(&l).map_err(e)?;
+            undo_push(db, &format!("Archived list: {name}"), &Undo { restore_lists: vec![before], ..Undo::default() }, now)
+        }
         Change::Move { moves } => apply_moves(db, moves, false, now),
         Change::Plan { moves } => apply_moves(db, moves, true, now),
         Change::Delete { ids, .. } => {
@@ -262,8 +503,14 @@ pub fn undo(db: &Db, id: i64) -> Res<()> {
     for it in &u.restore {
         db.put(it).map_err(e)?;
     }
+    for l in &u.restore_lists {
+        db.put_list(l).map_err(e)?;
+    }
     for id in &u.remove_items {
         db.delete(*id).map_err(e)?;
+    }
+    for id in &u.remove_lists {
+        db.delete_list(*id).map_err(e)?;
     }
     for c in &u.remove_completions {
         db.remove_completion(*c).map_err(e)?;
@@ -320,11 +567,15 @@ pub fn make_plan(db: &Db, now: NaiveDateTime, only_missed: bool) -> Res<Option<i
     Ok(Some(db.add_proposal(&change, to_utc(now)).map_err(e)?))
 }
 
-/// Example day so the first screen is never empty. Safe to press once.
+/// Example board so the first screen is never empty. Safe to press once.
 pub fn load_sample(db: &Db, now: NaiveDateTime) -> Res<usize> {
     if db.list(true).map_err(e)?.iter().any(|x| x.sample) {
-        return Err("The sample day is already loaded.".into());
+        return Err("The sample board is already loaded.".into());
     }
+    let lists = db.lists(false).map_err(e)?;
+    let todo = default_list(db)?;
+    let doing = lists.iter().filter(|l| !l.done_list).nth(1).map(|l| l.id).unwrap_or(todo);
+    let done = lists.iter().find(|l| l.done_list).map(|l| l.id).unwrap_or(todo);
     let today = now.date();
     let day = |n: i64| today + Duration::days(n);
     let t = |h, m| NaiveTime::from_hms_opt(h, m, 0);
@@ -339,25 +590,34 @@ pub fn load_sample(db: &Db, now: NaiveDateTime) -> Res<usize> {
         repeat: rep,
         until: None,
     };
-    let list = vec![
-        mk("Team standup", true, Some(today), t(10, 0), 30, 1, Some(Repeat::Weekdays)),
-        mk("Lunch with Maya", true, Some(today), t(13, 0), 60, 1, None),
-        mk("Dentist appointment", true, Some(day(1)), t(16, 30), 60, 1, None),
-        mk("Call John", false, Some(day(1)), t(17, 0), 15, 1, None),
-        mk("Send project report", false, Some(day(2)), None, 90, 2, None),
-        mk("Buy groceries", false, Some(today), None, 45, 0, None),
-        mk("Pay electricity bill", false, Some(day(-1)), None, 15, 2, None),
-        mk("Water the plants", false, Some(today), t(20, 0), 10, 1, Some(Repeat::Daily(1))),
-        mk("Weekly review", false, Some(today + Duration::days((4 - today.weekday().num_days_from_monday() as i64 + 7) % 7)), t(16, 0), 30, 1, Some(Repeat::Weekly { every: 1, days: vec![4] })),
-        mk("Read 20 pages", false, None, None, 30, 0, None),
+    let ck = |v: &[(&str, bool)]| v.iter().map(|(t, d)| Check { t: t.to_string(), d: *d }).collect::<Vec<_>>();
+    // (card, list, labels, notes, checklist)
+    let list: Vec<(NewItem, i64, &str, &str, Vec<Check>)> = vec![
+        (mk("Pay electricity bill", false, Some(day(-1)), None, 15, 2, None), todo, "red", "Account number is on the paper bill.", vec![]),
+        (mk("Send project report", false, Some(day(2)), None, 90, 2, None), todo, "purple,blue", "Send to the team before the meeting.", ck(&[("Write summary", true), ("Add charts", false), ("Email it", false)])),
+        (mk("Buy groceries", false, Some(today), None, 45, 0, None), todo, "green", "", ck(&[("Milk", false), ("Bread", false), ("Apples", false)])),
+        (mk("Call John", false, Some(day(1)), t(17, 0), 15, 1, None), todo, "yellow", "", vec![]),
+        (mk("Dentist appointment", true, Some(day(1)), t(16, 30), 60, 1, None), todo, "orange", "A fixed event: the planner will not move it.", vec![]),
+        (mk("Read 20 pages", false, None, None, 30, 0, None), todo, "", "", vec![]),
+        (mk("Water the plants", false, Some(today), t(20, 0), 10, 1, Some(Repeat::Daily(1))), doing, "green", "", vec![]),
+        (mk("Weekly review", false, Some(today + Duration::days((4 - today.weekday().num_days_from_monday() as i64 + 7) % 7)), t(16, 0), 30, 1, Some(Repeat::Weekly { every: 1, days: vec![4] })), doing, "blue", "", ck(&[("Check the board", true), ("Plan next week", false)])),
+        (mk("Lunch with Maya", true, Some(today), t(13, 0), 60, 1, None), doing, "orange", "", vec![]),
+        (mk("Book the dentist", false, None, None, 10, 1, None), done, "", "", vec![]),
     ];
     let n = list.len();
-    for x in &list {
-        create(db, x, true)?;
+    for (x, lid, labels, notes, checks) in list {
+        let mut it = create_in(db, &x, true, lid)?;
+        it.labels = labels.to_string();
+        it.notes = notes.to_string();
+        it.checklist = checks;
+        if it.remind_at.map_or(false, |r| r <= to_utc(now)) {
+            it.fired = true; // no pop-up banner for sample cards that are already late
+            it.acked = true;
+        }
+        db.put(&it).map_err(e)?;
     }
     Ok(n)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,27 +722,210 @@ mod tests {
         assert!(matches!(submit_delete(&db, &[s.id], now()).unwrap(), Outcome::Proposal(_)));
     }
 
-    #[test]
-    fn done_on_repeating_task_moves_to_next_date_and_counts() {
-        let db = Db::memory().unwrap();
-        let n = NewItem { title: "Water".into(), is_event: false, date: Some(now().date()), time: NaiveTime::from_hms_opt(20, 0, 0), dur_min: 10, priority: 1, reminder_min: None, repeat: Some(Repeat::Daily(1)), until: None };
-        let it = create(&db, &n, false).unwrap();
-        complete(&db, it.id, now()).unwrap();
-        let after = db.get(it.id).unwrap().unwrap();
-        assert!(!after.done);
-        assert_eq!(after.at_local(), Some(dt(24, 20, 0)));
-        assert_eq!(db.completions_between(0, i64::MAX).unwrap().len(), 1);
+    fn list_id(db: &Db, name: &str) -> i64 {
+        db.lists(false).unwrap().into_iter().find(|l| l.name == name).unwrap().id
+    }
+    fn titles(db: &Db, list: &str) -> Vec<String> {
+        db.cards_in(list_id(db, list)).unwrap().into_iter().map(|c| c.title).collect()
+    }
+    fn plain(title: &str) -> NewItem {
+        NewItem { title: title.into(), is_event: false, date: None, time: None, dur_min: 30, priority: 1, reminder_min: None, repeat: None, until: None }
     }
 
     #[test]
-    fn series_with_until_finishes() {
+    fn a_new_board_has_three_lists_and_cards_land_in_to_do() {
+        let db = Db::memory().unwrap();
+        let names: Vec<String> = db.lists(false).unwrap().into_iter().map(|l| l.name).collect();
+        assert_eq!(names, ["To do", "Doing", "Done"]);
+        assert!(db.lists(false).unwrap()[2].done_list);
+        create(&db, &plain("A"), false).unwrap();
+        assert_eq!(titles(&db, "To do"), ["A"]);
+    }
+
+    #[test]
+    fn card_order_drag_reorders_within_and_between_lists() {
+        let db = Db::memory().unwrap();
+        let ids: Vec<i64> = ["A", "B", "C"].iter().map(|t| create(&db, &plain(t), false).unwrap().id).collect();
+        let (todo, doing) = (list_id(&db, "To do"), list_id(&db, "Doing"));
+        place_cards(&db, &[(ids[2], todo, Some(0))], now()).unwrap();
+        assert_eq!(titles(&db, "To do"), ["C", "A", "B"]);
+        place_cards(&db, &[(ids[0], todo, Some(2))], now()).unwrap();
+        assert_eq!(titles(&db, "To do"), ["C", "B", "A"]);
+        place_cards(&db, &[(ids[1], doing, Some(0))], now()).unwrap();
+        assert_eq!(titles(&db, "To do"), ["C", "A"]);
+        assert_eq!(titles(&db, "Doing"), ["B"]);
+        place_cards(&db, &[(ids[0], doing, Some(0))], now()).unwrap();
+        assert_eq!(titles(&db, "Doing"), ["A", "B"]);
+        place_cards(&db, &[(ids[2], doing, Some(99))], now()).unwrap(); // past the end = the end
+        assert_eq!(titles(&db, "Doing"), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn one_card_drag_applies_and_undo_restores_the_order() {
+        let db = Db::memory().unwrap();
+        let ids: Vec<i64> = ["A", "B"].iter().map(|t| create(&db, &plain(t), false).unwrap().id).collect();
+        let doing = list_id(&db, "Doing");
+        let Outcome::Applied(u) = submit_card_moves(&db, &[(ids[0], doing, None)], now()).unwrap() else { panic!("one drag is free") };
+        assert_eq!(titles(&db, "Doing"), ["A"]);
+        undo(&db, u).unwrap();
+        assert_eq!(titles(&db, "To do"), ["A", "B"]);
+        assert!(titles(&db, "Doing").is_empty());
+    }
+
+    #[test]
+    fn moving_to_done_completes_and_moving_out_reopens() {
+        let db = Db::memory().unwrap();
+        let c = create(&db, &plain("Write"), false).unwrap();
+        let (done, doing) = (list_id(&db, "Done"), list_id(&db, "Doing"));
+        let Outcome::Applied(u) = submit_card_moves(&db, &[(c.id, done, None)], now()).unwrap() else { panic!() };
+        assert!(db.get(c.id).unwrap().unwrap().done);
+        assert_eq!(db.completions_between(0, i64::MAX).unwrap().len(), 1);
+        undo(&db, u).unwrap();
+        assert!(!db.get(c.id).unwrap().unwrap().done);
+        assert!(db.completions_between(0, i64::MAX).unwrap().is_empty());
+        complete(&db, c.id, now()).unwrap();
+        assert_eq!(titles(&db, "Done"), ["Write"]);
+        place_cards(&db, &[(c.id, doing, None)], now()).unwrap();
+        assert!(!db.get(c.id).unwrap().unwrap().done);
+        assert!(complete(&db, c.id, now()).is_ok());
+        assert!(complete(&db, c.id, now()).is_err());
+    }
+
+    #[test]
+    fn done_on_repeating_card_spawns_the_next_copy_in_to_do() {
+        let db = Db::memory().unwrap();
+        let n = NewItem { title: "Water".into(), is_event: false, date: Some(now().date()), time: NaiveTime::from_hms_opt(20, 0, 0), dur_min: 10, priority: 1, reminder_min: None, repeat: Some(Repeat::Daily(1)), until: None };
+        let it = create_in(&db, &n, false, list_id(&db, "Doing")).unwrap();
+        let mut chk = db.get(it.id).unwrap().unwrap();
+        chk.checklist = vec![Check { t: "x".into(), d: true }];
+        db.put(&chk).unwrap();
+        let u = complete(&db, it.id, now()).unwrap();
+        let old = db.get(it.id).unwrap().unwrap();
+        assert!(old.done);
+        assert_eq!(old.list_id, list_id(&db, "Done"));
+        let todo = db.cards_in(list_id(&db, "To do")).unwrap();
+        assert_eq!(todo.len(), 1);
+        assert_eq!(todo[0].title, "Water");
+        assert_eq!(todo[0].at_local(), Some(dt(24, 20, 0)));
+        assert!(!todo[0].done && todo[0].repeat.is_some());
+        assert!(todo[0].checklist.iter().all(|c| !c.d), "checklist starts fresh");
+        // finishing the old card again later cannot spawn a second copy
+        assert!(old.repeat.is_none());
+        undo(&db, u).unwrap();
+        assert!(db.cards_in(list_id(&db, "To do")).unwrap().is_empty());
+        assert_eq!(db.completions_between(0, i64::MAX).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn series_with_until_does_not_spawn() {
         let db = Db::memory().unwrap();
         let n = NewItem { title: "Course".into(), is_event: false, date: Some(now().date()), time: None, dur_min: 30, priority: 1, reminder_min: None, repeat: Some(Repeat::Daily(1)), until: Some(now().date()) };
         let it = create(&db, &n, false).unwrap();
         complete(&db, it.id, now()).unwrap();
         assert!(db.get(it.id).unwrap().unwrap().done);
+        assert!(titles(&db, "To do").is_empty());
     }
 
+    #[test]
+    fn bulk_card_moves_of_three_wait_for_approval() {
+        let db = Db::memory().unwrap();
+        let ids: Vec<i64> = ["A", "B", "C"].iter().map(|t| create(&db, &plain(t), false).unwrap().id).collect();
+        let doing = list_id(&db, "Doing");
+        let two: Vec<_> = ids[..2].iter().map(|i| (*i, doing, None)).collect();
+        assert!(matches!(submit_card_moves(&db, &two, now()).unwrap(), Outcome::Applied(_)));
+        let todo = list_id(&db, "To do");
+        assert!(matches!(submit_move_all(&db, doing, todo, now()).unwrap(), Outcome::Applied(_)), "two cards are not gated");
+        let three: Vec<_> = ids.iter().map(|i| (*i, doing, None)).collect();
+        let Outcome::Proposal(p) = submit_card_moves(&db, &three, now()).unwrap() else { panic!("3 cards need approval") };
+        assert_eq!(titles(&db, "To do").len() + titles(&db, "Doing").len(), 3);
+        assert_eq!(titles(&db, "Doing").len(), 0, "nothing moved before Approve");
+        approve(&db, p, now()).unwrap();
+        assert_eq!(titles(&db, "Doing"), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn archiving_a_list_with_cards_needs_approval_and_undo_brings_it_back() {
+        let db = Db::memory().unwrap();
+        let doing = list_id(&db, "Doing");
+        // empty list: free
+        let extra = {
+            add_list(&db, "Ideas", now()).unwrap();
+            list_id(&db, "Ideas")
+        };
+        assert!(matches!(submit_archive_list(&db, extra, now()).unwrap(), Outcome::Applied(_)));
+        assert!(db.lists(false).unwrap().iter().all(|l| l.name != "Ideas"));
+        // list with a card: asks first
+        let c = create_in(&db, &plain("Keep me"), false, doing).unwrap();
+        let Outcome::Proposal(p) = submit_archive_list(&db, doing, now()).unwrap() else { panic!("needs approval") };
+        assert!(db.lists(false).unwrap().iter().any(|l| l.name == "Doing"), "still there before Approve");
+        let u = approve(&db, p, now()).unwrap();
+        assert!(db.lists(false).unwrap().iter().all(|l| l.name != "Doing"));
+        assert!(db.list(true).unwrap().iter().all(|x| x.id != c.id), "cards of an archived list leave the calendar");
+        undo(&db, u).unwrap();
+        assert!(db.lists(false).unwrap().iter().any(|l| l.name == "Doing"));
+        assert_eq!(titles(&db, "Doing"), ["Keep me"]);
+    }
+
+    #[test]
+    fn the_last_open_list_and_the_done_list_cannot_be_archived() {
+        let db = Db::memory().unwrap();
+        assert!(submit_archive_list(&db, list_id(&db, "Done"), now()).is_err());
+        let doing = list_id(&db, "Doing");
+        assert!(submit_archive_list(&db, doing, now()).is_ok());
+        assert!(submit_archive_list(&db, list_id(&db, "To do"), now()).is_err());
+    }
+
+    #[test]
+    fn lists_can_be_added_renamed_and_reordered() {
+        let db = Db::memory().unwrap();
+        add_list(&db, "  Ideas ", now()).unwrap();
+        assert!(add_list(&db, "   ", now()).is_err());
+        let names = |db: &Db| db.lists(false).unwrap().into_iter().map(|l| l.name).collect::<Vec<_>>();
+        assert_eq!(names(&db), ["To do", "Doing", "Done", "Ideas"]);
+        let ideas = list_id(&db, "Ideas");
+        let u = rename_list(&db, ideas, "Someday", now()).unwrap();
+        assert_eq!(names(&db)[3], "Someday");
+        undo(&db, u).unwrap();
+        assert_eq!(names(&db)[3], "Ideas");
+        let u = move_list(&db, ideas, 0, now()).unwrap();
+        assert_eq!(names(&db), ["Ideas", "To do", "Doing", "Done"]);
+        undo(&db, u).unwrap();
+        assert_eq!(names(&db), ["To do", "Doing", "Done", "Ideas"]);
+        move_list(&db, list_id(&db, "To do"), 99, now()).unwrap();
+        assert_eq!(names(&db), ["Doing", "Done", "Ideas", "To do"]);
+    }
+
+    #[test]
+    fn card_panel_save_checks_input_and_keeps_labels_in_the_palette() {
+        let db = Db::memory().unwrap();
+        let c = create(&db, &plain("A"), false).unwrap();
+        let mut f = CardForm {
+            title: " New title ".into(),
+            notes: "n".into(),
+            priority: 9,
+            labels: vec!["red".into(), "evil".into(), "blue".into()],
+            checklist: vec![Check { t: " one ".into(), d: true }, Check { t: "  ".into(), d: false }],
+            date: Some(now().date()),
+            time: NaiveTime::from_hms_opt(17, 0, 0),
+            reminder_min: None,
+            repeat: None,
+            until: None,
+            is_event: false,
+            dur_min: 30,
+        };
+        update_card(&db, c.id, &f, now()).unwrap();
+        let g = db.get(c.id).unwrap().unwrap();
+        assert_eq!(g.title, "New title");
+        assert_eq!(g.priority, 2);
+        assert_eq!(g.labels, "blue,red".split(',').rev().collect::<Vec<_>>().join(","));
+        assert_eq!(g.checklist, vec![Check { t: "one".into(), d: true }]);
+        assert!(g.has_time && g.remind_at.is_some());
+        f.title = "   ".into();
+        assert!(update_card(&db, c.id, &f, now()).is_err());
+        f.title = "ok".into();
+        f.notes = "x".repeat(5001);
+        assert!(update_card(&db, c.id, &f, now()).is_err());
+    }
     #[test]
     fn reminders_fire_once_and_can_be_dismissed() {
         let db = Db::memory().unwrap();

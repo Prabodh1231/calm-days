@@ -16,7 +16,9 @@ The app listens on 127.0.0.1 only. Other computers on your network cannot reach 
 
 ## What it does
 
-Add by sentence with a preview, task list, calendar (day and week), dashboard, daily planner, "What should I do now?", missed-task rescheduling, repeating tasks, reminders, daily and weekly summaries, dark mode, and a layout that works at 375 px wide. The first screen has a one-line purpose, example sentences and a "Load sample day" button.
+A Trello-style board. Lists (To do, Doing, Done to start) hold cards. Drag cards between lists and reorder them, or use the Move to... button on a card (list and position, works on phones and with a keyboard). Lists can be added, renamed, moved left or right and archived from the ... menu. Each card has a title, notes, due date and time, priority, colour labels, checklist, reminder and repeat rule. "+ Add a card" reads a plain sentence and shows chips before saving. Moving a card to a Done list completes it; a repeating card then adds its next copy to To do. Also: search and filter, "What should I do now?", a calendar (drag cards onto an hour), a daily planner that only proposes, daily and weekly summaries, reminders, dark mode and a 375 px phone layout. A fresh install opens with a sample board. An old Calm Days database is migrated in place (cards keep their data; finished ones go to Done).
+
+Asks first: moving 3 or more cards at once, archiving a list that has cards, deleting events or series, and every planner proposal. One drag gets a 10-second Undo.
 
 ## "Smart text reading" is rules, not AI
 

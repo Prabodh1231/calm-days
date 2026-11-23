@@ -11,6 +11,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // First run: fill the board with an example so the first screen is never blank.
+    if db.meta("seeded").is_none() {
+        if db.list(true).map(|v| v.is_empty()).unwrap_or(false) {
+            let _ = calm_days::ops::load_sample(&db, calm_days::store::now_local());
+        }
+        let _ = db.set_meta("seeded", "1");
+    }
     let shared = Arc::new(Mutex::new(db));
     web::spawn_scheduler(shared.clone());
     // Local only: never 0.0.0.0.

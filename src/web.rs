@@ -2,7 +2,7 @@
 use crate::ops::{self, NewItem, Outcome};
 use crate::parser;
 use crate::repeat::Repeat;
-use crate::store::{now_local, to_utc, Db, Undo};
+use crate::store::{now_local, to_utc, Check, Db, Item, Undo};
 use crate::view;
 use axum::{
     extract::{Path, Query, Request, State},
@@ -57,6 +57,17 @@ pub fn router(shared: Shared) -> Router {
         .route("/static/style.css", get(css))
         .route("/api/parse", post(api_parse))
         .route("/api/tasks", post(api_save))
+        .route("/api/now", get(api_now))
+        .route("/api/cards/move", post(api_card_move))
+        .route("/api/cards/:id", get(api_card_get))
+        .route("/api/cards/:id/update", post(api_card_update))
+        .route("/api/cards/:id/archive", post(api_card_archive))
+        .route("/api/lists", post(api_list_add))
+        .route("/api/lists/move-all", post(api_list_move_all))
+        .route("/api/lists/:id/rename", post(api_list_rename))
+        .route("/api/lists/:id/move", post(api_list_move))
+        .route("/api/lists/:id/archive", post(api_list_archive))
+        .route("/api/board/rename", post(api_board_rename))
         .route("/api/tasks/:id/done", post(api_done))
         .route("/api/tasks/:id/edit", post(api_edit))
         .route("/api/delete", post(api_delete))
@@ -85,14 +96,17 @@ fn day_range(d: NaiveDate, days: i64) -> (i64, i64) {
     (to_utc(a), to_utc(a + Duration::days(days)))
 }
 
+pub fn board_name(db: &Db) -> String {
+    db.meta("board_name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "My board".into())
+}
+
 async fn index(State(s): State<Shared>) -> Html<String> {
     let db = lock(&s);
     let now = now_local();
-    let (a, b) = day_range(now.date(), 1);
-    let items = db.list(false).unwrap_or_default();
-    let done = db.completions_between(a, b).map(|v| v.len()).unwrap_or(0);
+    let lists = db.lists(false).unwrap_or_default();
+    let cards: Vec<Item> = lists.iter().flat_map(|l| db.cards_in(l.id).unwrap_or_default()).collect();
     let pending = db.pending_proposals().map(|v| v.len()).unwrap_or(0);
-    Html(view::today_page(&items, done, pending, now))
+    Html(view::board_page(&board_name(&db), &lists, &cards, pending, now))
 }
 
 async fn calendar(State(s): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Html<String> {
@@ -100,12 +114,12 @@ async fn calendar(State(s): State<Shared>, Query(q): Query<HashMap<String, Strin
     let now = now_local();
     let week = q.get("view").map_or(true, |v| v != "day");
     let date = q.get("date").and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).unwrap_or(now.date());
-    Html(view::calendar_page(&db.list(false).unwrap_or_default(), week, date, now))
+    Html(view::calendar_page(&board_name(&db), &db.list(false).unwrap_or_default(), week, date, now))
 }
 
 async fn plan_page(State(s): State<Shared>) -> Html<String> {
     let db = lock(&s);
-    Html(view::plan_page(&db.pending_proposals().unwrap_or_default(), &db.recent_undo(10).unwrap_or_default(), now_local()))
+    Html(view::plan_page(&board_name(&db), &db.pending_proposals().unwrap_or_default(), &db.recent_undo(10).unwrap_or_default(), now_local()))
 }
 
 async fn summary(State(s): State<Shared>) -> Html<String> {
@@ -115,9 +129,8 @@ async fn summary(State(s): State<Shared>) -> Html<String> {
     let (w, _) = day_range(now.date() - Duration::days(6), 1);
     let today = db.completions_between(a, b).unwrap_or_default();
     let week = db.completions_between(w, b).unwrap_or_default();
-    Html(view::summary_page(&db.list(false).unwrap_or_default(), &today, &week, now))
+    Html(view::summary_page(&board_name(&db), &db.list(false).unwrap_or_default(), &today, &week, now))
 }
-
 async fn js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../assets/app.js"))
 }
@@ -144,6 +157,7 @@ struct SaveReq {
     until: Option<String>,
     dur_min: Option<i64>,
     kind: Option<String>,
+    list_id: Option<i64>,
 }
 
 fn nz(o: &Option<String>) -> Option<&str> {
@@ -160,10 +174,12 @@ fn parse_dt(s: &str) -> Result<NaiveDateTime, (StatusCode, Json<Value>)> {
         .map_err(|_| bad("The date and time look wrong."))
 }
 
-async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
-    let now = now_local();
-    let date = nz(&r.date).map(parse_date).transpose()?;
-    let time = match nz(&r.time) {
+type When = (Option<NaiveDate>, Option<NaiveTime>, Option<Repeat>, Option<NaiveDate>);
+
+/// Read the date, time, repeat and until boxes of a form.
+fn read_when(date: &Option<String>, time: &Option<String>, repeat: &Option<String>, until: &Option<String>, now: NaiveDateTime) -> Result<When, (StatusCode, Json<Value>)> {
+    let date = nz(date).map(parse_date).transpose()?;
+    let time = match nz(time) {
         Some(t) => Some(
             NaiveTime::parse_from_str(t, "%H:%M")
                 .or_else(|_| NaiveTime::parse_from_str(t, "%H:%M:%S"))
@@ -174,19 +190,25 @@ async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
     if time.is_some() && date.is_none() {
         return Err(bad("A time needs a date. Pick a date too."));
     }
-    let until = nz(&r.until).map(parse_date).transpose()?;
-    let mut repeat = match nz(&r.repeat) {
+    let until = nz(until).map(parse_date).transpose()?;
+    let mut rep = match nz(repeat) {
         None => None,
         Some(t) if t.eq_ignore_ascii_case("none") => None,
         Some(t) => Some(parser::parse_repeat_phrase(t, now).ok_or_else(|| bad("I could not read the repeat. Try: every week on mon and wed"))?),
     };
-    if let (Some(Repeat::Monthly(0)), Some(d)) = (&repeat, date) {
+    if let (Some(Repeat::Monthly(0)), Some(d)) = (&rep, date) {
         use chrono::Datelike;
-        repeat = Some(Repeat::Monthly(d.day()));
+        rep = Some(Repeat::Monthly(d.day()));
     }
-    if repeat.is_some() && date.is_none() {
+    if rep.is_some() && date.is_none() {
         return Err(bad("A repeat needs a start date. Pick a date too."));
     }
+    Ok((date, time, rep, until))
+}
+
+async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
+    let now = now_local();
+    let (date, time, repeat, until) = read_when(&r.date, &r.time, &r.repeat, &r.until, now)?;
     let n = NewItem {
         title: r.title,
         is_event: r.kind.as_deref() == Some("event"),
@@ -199,13 +221,144 @@ async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
         until,
     };
     let db = lock(&s);
-    let it = ops::create(&db, &n, false).map_err(bad)?;
+    let list = match r.list_id {
+        Some(l) => l,
+        None => ops::default_list(&db).map_err(bad)?,
+    };
+    let it = ops::create_in(&db, &n, false, list).map_err(bad)?;
     let undo = db
         .add_undo(&format!("Added: {}", it.title), &Undo { remove_items: vec![it.id], ..Undo::default() }, to_utc(now))
         .map_err(bad)?;
     Ok(Json(json!({ "status": "applied", "undo": undo, "id": it.id, "message": "Saved." })))
 }
 
+// ---- cards ----
+async fn api_card_get(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
+    let db = lock(&s);
+    let it = db.get(id).map_err(bad)?.ok_or_else(|| bad("That card no longer exists."))?;
+    let index = db.cards_in(it.list_id).map_err(bad)?.iter().position(|c| c.id == id).unwrap_or(0);
+    let a = it.at_local();
+    Ok(Json(json!({
+        "id": it.id, "title": it.title, "notes": it.notes, "priority": it.priority,
+        "labels": it.label_keys(), "checklist": it.checklist,
+        "date": a.map(|a| a.format("%Y-%m-%d").to_string()),
+        "time": a.filter(|_| it.has_time).map(|a| a.format("%H:%M").to_string()),
+        "reminder_min": it.reminder_min,
+        "repeat": it.repeat.as_ref().map(crate::repeat::describe).unwrap_or_default(),
+        "until": it.until.map(|d| d.format("%Y-%m-%d").to_string()),
+        "kind": it.kind, "dur_min": it.dur_min, "list_id": it.list_id, "index": index, "done": it.done,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CardReq {
+    title: String,
+    notes: Option<String>,
+    priority: Option<i64>,
+    labels: Option<Vec<String>>,
+    checklist: Option<Vec<Check>>,
+    date: Option<String>,
+    time: Option<String>,
+    reminder_min: Option<i64>,
+    repeat: Option<String>,
+    until: Option<String>,
+    kind: Option<String>,
+    dur_min: Option<i64>,
+}
+async fn api_card_update(State(s): State<Shared>, Path(id): Path<i64>, Json(r): Json<CardReq>) -> ApiRes {
+    let now = now_local();
+    let (date, time, repeat, until) = read_when(&r.date, &r.time, &r.repeat, &r.until, now)?;
+    let f = ops::CardForm {
+        title: r.title,
+        notes: r.notes.unwrap_or_default(),
+        priority: r.priority.unwrap_or(1),
+        labels: r.labels.unwrap_or_default(),
+        checklist: r.checklist.unwrap_or_default(),
+        date,
+        time,
+        reminder_min: r.reminder_min,
+        repeat,
+        until,
+        is_event: r.kind.as_deref() == Some("event"),
+        dur_min: r.dur_min.unwrap_or(30),
+    };
+    let u = ops::update_card(&lock(&s), id, &f, now).map_err(bad)?;
+    Ok(outcome(Outcome::Applied(u), "Saved."))
+}
+async fn api_card_archive(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
+    let u = ops::archive_card(&lock(&s), id, now_local()).map_err(bad)?;
+    Ok(outcome(Outcome::Applied(u), "Card archived."))
+}
+
+#[derive(Deserialize)]
+struct CardMoveItem {
+    id: i64,
+    list: i64,
+    index: Option<usize>,
+}
+#[derive(Deserialize)]
+struct CardMoveReq {
+    moves: Vec<CardMoveItem>,
+}
+async fn api_card_move(State(s): State<Shared>, Json(r): Json<CardMoveReq>) -> ApiRes {
+    let m: Vec<(i64, i64, Option<usize>)> = r.moves.iter().map(|m| (m.id, m.list, m.index)).collect();
+    Ok(outcome(ops::submit_card_moves(&lock(&s), &m, now_local()).map_err(bad)?, "Moved."))
+}
+
+// ---- lists ----
+#[derive(Deserialize)]
+struct NameReq {
+    name: String,
+}
+async fn api_list_add(State(s): State<Shared>, Json(r): Json<NameReq>) -> ApiRes {
+    let u = ops::add_list(&lock(&s), &r.name, now_local()).map_err(bad)?;
+    Ok(outcome(Outcome::Applied(u), "List added."))
+}
+async fn api_list_rename(State(s): State<Shared>, Path(id): Path<i64>, Json(r): Json<NameReq>) -> ApiRes {
+    let u = ops::rename_list(&lock(&s), id, &r.name, now_local()).map_err(bad)?;
+    Ok(outcome(Outcome::Applied(u), "List renamed."))
+}
+#[derive(Deserialize)]
+struct IndexReq {
+    index: usize,
+}
+async fn api_list_move(State(s): State<Shared>, Path(id): Path<i64>, Json(r): Json<IndexReq>) -> ApiRes {
+    let u = ops::move_list(&lock(&s), id, r.index, now_local()).map_err(bad)?;
+    Ok(outcome(Outcome::Applied(u), "List moved."))
+}
+async fn api_list_archive(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
+    Ok(outcome(ops::submit_archive_list(&lock(&s), id, now_local()).map_err(bad)?, "List archived."))
+}
+#[derive(Deserialize)]
+struct MoveAllReq {
+    from: i64,
+    to: i64,
+}
+async fn api_list_move_all(State(s): State<Shared>, Json(r): Json<MoveAllReq>) -> ApiRes {
+    Ok(outcome(ops::submit_move_all(&lock(&s), r.from, r.to, now_local()).map_err(bad)?, "Cards moved."))
+}
+async fn api_board_rename(State(s): State<Shared>, Json(r): Json<NameReq>) -> ApiRes {
+    let n = r.name.trim();
+    if n.is_empty() || n.chars().count() > 60 {
+        return Err(bad("The board name needs 1 to 60 letters."));
+    }
+    lock(&s).set_meta("board_name", n).map_err(bad)?;
+    Ok(Json(json!({ "status": "ok", "message": "Board renamed." })))
+}
+
+/// "What should I do now?" for the top bar.
+async fn api_now(State(s): State<Shared>) -> ApiRes {
+    let db = lock(&s);
+    let now = now_local();
+    let items = db.list(false).map_err(bad)?;
+    Ok(Json(match crate::planner::do_now(now, &view::now_task_list(&items)) {
+        Some((id, why)) => match items.iter().find(|i| i.id == id) {
+            Some(it) => json!({ "id": id, "title": it.title, "why": why, "when": view::when_label(it, now) }),
+            None => json!({ "clear": true }),
+        },
+        None => json!({ "clear": true }),
+    }))
+}
 fn outcome(o: Outcome, msg: &str) -> Json<Value> {
     match o {
         Outcome::Applied(u) => Json(json!({ "status": "applied", "undo": u, "message": msg })),
