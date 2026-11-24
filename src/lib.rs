@@ -1,5 +1,7 @@
 //! Calm Days: a calm calendar and to-do app. Server-rendered HTML, a little plain JavaScript.
 pub mod approval;
+pub mod calview;
+pub mod extra;
 pub mod ops;
 pub mod parser;
 pub mod planner;

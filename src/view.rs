@@ -2,8 +2,9 @@
 use crate::approval::Change;
 use crate::planner::NowTask;
 use crate::repeat;
+use crate::extra::{pulse, short_id};
 use crate::store::{Completion, Item, ListRow, UndoRow};
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 
 /// Escape text for HTML (also safe inside double-quoted attributes).
 pub fn esc(s: &str) -> String {
@@ -68,7 +69,8 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
 <header class="top"><a class="brand" href="/" aria-label="Calm Days home">Calm Days</a>
 <input id="board-name" class="board-name" type="text" maxlength="60" value="{board}" aria-label="Board name (click to rename)">
 <nav aria-label="Main">{nav}</nav>
-<div class="tools"><button id="now-btn" type="button" class="primary">What should I do now?</button>
+<div class="tools"><button id="cmdk-btn" type="button" class="cmdk-btn" aria-label="Open the command menu (Ctrl+K)">Search or jump <kbd>Ctrl K</kbd></button>
+<button id="now-btn" type="button" class="primary">What should I do now?</button>
 <a class="btn" href="/plan"{plan_cur}>Planner</a>
 <button id="theme" type="button" aria-label="Switch between light and dark mode">Dark mode</button></div></header>
 <div id="banner" role="status" aria-live="polite"></div>
@@ -95,6 +97,21 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
 <dialog id="confirm-dialog" aria-labelledby="confirm-h"><h2 id="confirm-h">Please confirm</h2>
 <ul id="confirm-lines"></ul><p class="muted">Nothing has changed yet. It changes only if you press Approve.</p>
 <div class="row"><button id="confirm-ok" type="button" class="primary">Approve</button><button id="confirm-cancel" type="button">Cancel</button></div></dialog>
+<div id="cmdk" class="cmdk" hidden><div class="cmdk-box" role="dialog" aria-modal="true" aria-label="Command menu">
+<input id="cmdk-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type a command or search cards..." aria-label="Command menu search" aria-controls="cmdk-list">
+<ul id="cmdk-list" role="listbox" aria-label="Results"></ul>
+<p class="cmdk-hint muted"><kbd>&#8593;</kbd> <kbd>&#8595;</kbd> to choose, <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close. Press <kbd>?</kbd> for all shortcuts.</p></div></div>
+<dialog id="help-dialog" aria-labelledby="help-h"><h2 id="help-h">Keyboard shortcuts</h2>
+<table class="keys"><tbody>
+<tr><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>Command menu: search cards, run actions, add a card</td></tr>
+<tr><td><kbd>C</kbd></td><td>New card (goes to the Inbox)</td></tr>
+<tr><td><kbd>/</kbd></td><td>Search cards</td></tr>
+<tr><td><kbd>G</kbd> then <kbd>B</kbd> / <kbd>C</kbd> / <kbd>S</kbd></td><td>Go to Board / Calendar / Summary</td></tr>
+<tr><td><kbd>E</kbd></td><td>Open the card you are pointing at or have selected</td></tr>
+<tr><td><kbd>?</kbd></td><td>Show this sheet</td></tr>
+<tr><td><kbd>Esc</kbd></td><td>Close a menu, sheet or card</td></tr>
+</tbody></table><p class="muted">Shortcuts pause while you type in a box.</p>
+<div class="row"><button id="help-close" type="button" class="primary">Close</button></div></dialog>
 <aside id="panel" aria-label="Card details" hidden></aside>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/static/app.js"></script>
@@ -104,7 +121,7 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
         nav = nav,
         body = body,
         plan_cur = plan_cur,
-        bodycls = if active == "/" { "board-bg" } else { "" }
+        bodycls = match active { "/" => "board-bg", "/calendar" => "cal-page", _ => "" }
     )
 }
 
@@ -176,9 +193,15 @@ pub fn card_html(it: &Item, now: NaiveDateTime) -> String {
     if !it.notes.trim().is_empty() {
         meta.push_str("<span class=\"chip icon\" title=\"Has notes\" aria-label=\"Has notes\">&#9776;</span>");
     }
-    let q = format!("{} {}", it.title, it.notes).to_lowercase();
+    let cid = short_id(it.id);
+    let q = format!("{} {} {}", cid, it.title, it.notes).to_lowercase();
+    let cyc = match crate::extra::cycle_choice(&it.cycle, now.date()) {
+        "this" => "<span class=\"chip cyc\" title=\"In this week's cycle\">This week</span>",
+        "next" => "<span class=\"chip cyc\" title=\"In next week's cycle\">Next week</span>",
+        _ => "",
+    };
     format!(
-        "<article class=\"bcard{done}\" draggable=\"true\" tabindex=\"0\" role=\"button\" aria-label=\"Open card: {t}\" data-id=\"{id}\" data-labels=\"{lab}\" data-due=\"{dc}\" data-q=\"{q}\">{lbls}<div class=\"ctitle\">{t}</div><div class=\"meta\">{meta}</div><button type=\"button\" class=\"cmove\" data-id=\"{id}\" data-title=\"{t}\" aria-label=\"Move {t} to another list\" title=\"Move to...\">&#8644;</button></article>",
+        "<article class=\"bcard{done}\" draggable=\"true\" tabindex=\"0\" role=\"button\" aria-label=\"Open card: {t}\" data-id=\"{id}\" data-labels=\"{lab}\" data-due=\"{dc}\" data-q=\"{q}\">{lbls}<div class=\"ctitle\">{t}</div><div class=\"meta\"><span class=\"cid\" title=\"Card id\">{cid}</span>{cyc}{meta}</div><button type=\"button\" class=\"cmove\" data-id=\"{id}\" data-title=\"{t}\" aria-label=\"Move {t} to another list\" title=\"Move to...\">&#8644;</button></article>",
         done = if it.done { " is-done" } else { "" },
         t = esc(&it.title),
         id = it.id,
@@ -232,30 +255,30 @@ pub fn board_page(board: &str, lists: &[ListRow], cards: &[Item], pending: usize
     } else {
         ""
     };
+    let today = now.date();
+    let (cyc_done, cyc_total) = crate::extra::cycle_stats(cards, today);
+    let next_n = cards.iter().filter(|c| !c.archived && crate::extra::cycle_choice(&c.cycle, today) == "next").count();
+    let cycle_bar = if cyc_total == 0 {
+        format!("<div class=\"cyclebar\"><b>This week</b><span class=\"muted\">No cards yet. Open a card and set <i>Cycle</i> to plan your week.</span><span class=\"muted\">Next week: {next_n}</span></div>")
+    } else {
+        format!(
+            "<div class=\"cyclebar\"><b>This week</b><span>{cyc_done} of {cyc_total} done</span><div class=\"bar2\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"{cyc_total}\" aria-valuenow=\"{cyc_done}\" aria-label=\"This week's cycle\"><i style=\"width:{}%\"></i></div><span class=\"muted\">Next week: {next_n}</span></div>",
+            100 * cyc_done / cyc_total
+        )
+    };
     let body = format!(
         r##"<div class="bar"><input id="q" type="search" placeholder="Search cards" aria-label="Search cards">
 <select id="f-label" aria-label="Filter by label"><option value="">All labels</option>{label_opts}</select>
 <select id="f-due" aria-label="Filter by due date"><option value="">Any due date</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="week">Due in 7 days</option><option value="none">No due date</option></select>
 <button type="button" id="f-clear">Clear</button><span id="f-count" class="muted" aria-live="polite"></span></div>
 <p class="intro">Type a sentence like &#39;call John tomorrow at 5 PM&#39; in any + Add a card box. Dates like 12/11 mean 12 November.</p>
-{proposals}{welcome}
+{cycle_bar}{proposals}{welcome}
 <div id="nomatch" class="nomatch" hidden><b>No cards match.</b> <button type="button" id="nm-clear">Clear</button></div>
 <div class="board" id="board" data-lists="{lj}">{cols}</div>"##,
         lj = esc(&lists_json),
+        cycle_bar = cycle_bar,
     );
     page(board, "Board", "/", &body)
-}
-
-fn item_row(it: &Item, now: NaiveDateTime) -> String {
-    let at = it.at_local().map(|a| a.format("%Y-%m-%dT%H:%M").to_string()).unwrap_or_default();
-    let t = esc(&it.title);
-    let overdue = if it.is_overdue(now) { " overdue" } else { "" };
-    format!(
-        r#"<li class="task{overdue}" draggable="true" data-id="{id}"><div class="main"><button type="button" class="open linklike" data-id="{id}">{t}</button><span class="when">{when}</span></div>
-<div class="acts"><button type="button" class="move" data-id="{id}" data-at="{at}" data-title="{t}" aria-label="Move {t} to another time">Move to...</button></div></li>"#,
-        id = it.id,
-        when = esc(&when_label(it, now)),
-    )
 }
 
 pub fn now_task_list(items: &[Item]) -> Vec<NowTask> {
@@ -266,76 +289,8 @@ pub fn now_task_list(items: &[Item]) -> Vec<NowTask> {
         .collect()
 }
 
-fn monday_of(d: NaiveDate) -> NaiveDate {
-    d - Duration::days(d.weekday().num_days_from_monday() as i64)
-}
-
 pub fn calendar_page(board: &str, items: &[Item], week: bool, date: NaiveDate, now: NaiveDateTime) -> String {
-    let (first, count) = if week { (monday_of(date), 7) } else { (date, 1) };
-    let step = if week { 7 } else { 1 };
-    let nav = format!(
-        "<div class=\"row between\"><div class=\"row\"><a class=\"btn\" href=\"/calendar?view={v}&date={prev}\">Previous</a><a class=\"btn\" href=\"/calendar?view={v}&date={today}\">Today</a><a class=\"btn\" href=\"/calendar?view={v}&date={next}\">Next</a></div><div class=\"row\"><a class=\"btn{d_on}\" href=\"/calendar?view=day&date={cur}\">Day</a><a class=\"btn{w_on}\" href=\"/calendar?view=week&date={cur}\">Week</a></div></div>",
-        v = if week { "week" } else { "day" },
-        prev = (date - Duration::days(step)).format("%Y-%m-%d"),
-        next = (date + Duration::days(step)).format("%Y-%m-%d"),
-        today = now.date().format("%Y-%m-%d"),
-        cur = date.format("%Y-%m-%d"),
-        d_on = if week { "" } else { " on" },
-        w_on = if week { " on" } else { "" },
-    );
-    let open: Vec<&Item> = items.iter().filter(|i| !i.done).collect();
-    let mut days = String::new();
-    for k in 0..count {
-        let d = first + Duration::days(k);
-        let cls = if d == now.date() { " today" } else { "" };
-        let allday: String = open
-            .iter()
-            .filter(|i| !i.has_time && i.at_local().map_or(false, |a| a.date() == d))
-            .map(|i| item_row(i, now))
-            .collect();
-        let mut rows = String::new();
-        for h in 6..=21u32 {
-            let cell: String = open
-                .iter()
-                .filter(|i| i.has_time)
-                .filter_map(|i| i.at_local().map(|a| (i, a)))
-                .filter(|(_, a)| a.date() == d && a.hour().clamp(6, 21) == h)
-                .map(|(i, a)| {
-                    format!(
-                        "<div class=\"card-ev{ev}\" draggable=\"true\" data-id=\"{id}\"><b>{t}</b> <button type=\"button\" class=\"open linklike\" data-id=\"{id}\">{title}</button><button type=\"button\" class=\"move small\" data-id=\"{id}\" data-at=\"{at}\" data-title=\"{title}\" aria-label=\"Move {title} to another time\">Move to...</button></div>",
-                        ev = if i.is_event() { " fixed" } else { "" },
-                        id = i.id,
-                        t = esc(&time_label(a.time())),
-                        title = esc(&i.title),
-                        at = a.format("%Y-%m-%dT%H:%M")
-                    )
-                })
-                .collect();
-            rows.push_str(&format!(
-                "<div class=\"slot\" data-slot=\"{}T{:02}:00\"><span class=\"hour\">{}</span><div class=\"cell\">{}</div></div>",
-                d.format("%Y-%m-%d"),
-                h,
-                time_label(NaiveTime::from_hms_opt(h, 0, 0).unwrap_or_default()),
-                cell
-            ));
-        }
-        let all = if allday.is_empty() { String::new() } else { format!("<ul class=\"tasks allday\">{allday}</ul>") };
-        days.push_str(&format!(
-            "<section class=\"day{cls}\"><h2>{}</h2>{all}<div class=\"slots\">{rows}</div></section>",
-            esc(&format!("{} {}", day_label(d, now.date()), d.format("%-d %b")))
-        ));
-    }
-    let loose: Vec<&Item> = open.iter().filter(|i| i.at.is_none()).copied().collect();
-    let side = if loose.is_empty() {
-        "<p class=\"muted\">Everything has a date.</p>".to_string()
-    } else {
-        format!("<ul class=\"tasks\">{}</ul>", loose.iter().map(|i| item_row(i, now)).collect::<String>())
-    };
-    let body = format!(
-        "<h1>Calendar</h1><p class=\"muted\">Drag a task onto an hour. On a phone or with a keyboard, use <b>Move to...</b> instead.</p>{nav}<div class=\"cal {}\">{days}</div><section class=\"card\"><h2>Not on the calendar yet</h2>{side}</section>",
-        if week { "week" } else { "dayview" }
-    );
-    page(board, "Calendar", "/calendar", &body)
+    crate::calview::calendar_page(board, items, if week { "week" } else { "day" }, date, now)
 }
 
 pub fn change_lines(c: &Change, now: NaiveDateTime) -> (String, Vec<String>) {
@@ -443,7 +398,15 @@ pub fn insights(done_today: usize, done_week: usize, high_done_week: usize, over
 }
 
 pub fn summary_page(board: &str, items: &[Item], comps_today: &[Completion], comps_week: &[Completion], now: NaiveDateTime) -> String {
+    summary_page_with(board, items, comps_today, comps_week, &[], now)
+}
+
+/// `not_started` = ids of the lists whose cards count as "not started" for the Weekly Pulse (Inbox and the first open list).
+pub fn summary_page_with(board: &str, items: &[Item], comps_today: &[Completion], comps_week: &[Completion], not_started: &[i64], now: NaiveDateTime) -> String {
     let today = now.date();
+    let monday = crate::extra::week_start(today).and_hms_opt(0, 0, 0).unwrap_or_default();
+    let done_this_week = comps_week.iter().filter(|c| c.done_at >= crate::store::to_utc(monday)).count();
+    let pulse_li: String = pulse(done_this_week, items, not_started, now).lines().iter().map(|l| format!("<li>{}</li>", esc(l))).collect();
     let open: Vec<&Item> = items.iter().filter(|i| !i.done).collect();
     let overdue: Vec<&Item> = open.iter().copied().filter(|i| i.is_overdue(now)).collect();
     let due_today: Vec<&Item> = open.iter().copied().filter(|i| !i.is_overdue(now) && i.at_local().map_or(false, |a| a.date() == today)).collect();
@@ -484,6 +447,7 @@ pub fn summary_page(board: &str, items: &[Item], comps_today: &[Completion], com
     let insight_li: String = ins.iter().map(|s| format!("<li>{}</li>", esc(s))).collect();
     let body = format!(
         r#"<h1>Summary</h1>
+<section class="card pulse"><h2>Weekly Pulse</h2><ul>{pulse_li}</ul></section>
 <section class="card"><h2>Insights</h2><ul>{insight_li}</ul></section>
 <section class="card"><h2>Daily summary</h2>
 <div class="stats"><div><b>{}</b><span>Done today</span></div><div><b>{}</b><span>Still due today</span></div><div class="{}"><b>{}</b><span>Overdue</span></div></div>
@@ -539,6 +503,7 @@ mod tests {
             labels: "red,<b>".into(),
             checklist: vec![Check { t: title.into(), d: true }],
             archived: false,
+            cycle: String::new(),
         }
     }
     fn lists(name: &str) -> Vec<ListRow> {
@@ -631,5 +596,32 @@ mod tests {
         assert_eq!(confirm_json(&one, now())["lines"][0], "Archive the list \"Doing\" and its 1 card");
         let plan = plan_page("b", &[(1, a)], &[], now());
         assert!(plan.contains("Back to board") && plan.contains("waiting for you"));
+    }
+
+    #[test]
+    fn cards_show_a_short_id_and_search_can_find_it() {
+        let mut c = evil("Pay rent");
+        c.id = 12;
+        c.cycle = "2026-11-23".into();
+        let h = card_html(&c, now());
+        assert!(h.contains(">CD-12</span>"), "{h}");
+        assert!(h.contains("data-q=\"cd-12 pay rent"), "{h}");
+        assert!(h.contains(">This week</span>"));
+        let b = board_page("b", &lists("To do"), &[c], 0, now());
+        assert!(b.contains("1 of 1 done") || b.contains("0 of 1 done"));
+        assert!(b.contains("id=\"cmdk\"") && b.contains("Keyboard shortcuts"));
+    }
+
+    #[test]
+    fn summary_has_a_weekly_pulse_with_real_numbers() {
+        let mut late = evil("Late");
+        late.at = Some(to_utc(now() - Duration::days(2)));
+        late.has_time = false;
+        let comps = [Completion { title: "Done one".into(), priority: 1, done_at: to_utc(now() - Duration::hours(1)) }];
+        let h = summary_page_with("b", &[late], &[], &comps, &[1], now());
+        assert!(h.contains("Weekly Pulse"));
+        assert!(h.contains("Done this week: 1."), "{h}");
+        assert!(h.contains("Slipped: 1 overdue."));
+        assert!(h.contains("At risk: nothing due soon is waiting."));
     }
 }

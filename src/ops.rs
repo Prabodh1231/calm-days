@@ -2,6 +2,7 @@
 use crate::approval::{needs_approval, CardMove, Change, Mv};
 use crate::planner::{self, Cand, DEFAULT_HOURS};
 use crate::repeat::{self, Repeat};
+use crate::extra;
 use crate::store::{from_utc, to_utc, Check, Db, Item, ListRow, Undo, LABELS};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 
@@ -51,10 +52,32 @@ fn undo_push(db: &Db, desc: &str, u: &Undo, now: NaiveDateTime) -> Res<i64> {
     db.add_undo(desc, u, to_utc(now)).map_err(e)
 }
 
-/// The list new cards land in: the first list that is not archived and not a Done list.
+/// Write one line in a card's activity log. A failed log never fails the change itself.
+fn log(db: &Db, id: i64, text: &str, now: NaiveDateTime) {
+    let _ = db.log_activity(id, text, to_utc(now));
+}
+
+fn due_note(at: Option<NaiveDateTime>, has_time: bool) -> String {
+    match at {
+        None => "Due date removed".into(),
+        Some(a) if has_time => format!("Due changed to {}", a.format("%a %-d %b, %-I:%M %p")),
+        Some(a) => format!("Due changed to {}", a.format("%a %-d %b")),
+    }
+}
+
+/// The list new cards land in: the first open list that is not the Inbox and not a Done list.
 pub fn default_list(db: &Db) -> Res<i64> {
     let ls = db.lists(false).map_err(e)?;
-    ls.iter().find(|l| !l.done_list).or(ls.first()).map(|l| l.id).ok_or_else(|| "There is no list to put the card in.".to_string())
+    let inbox = db.inbox_id();
+    ls.iter().find(|l| !l.done_list && Some(l.id) != inbox).or(ls.iter().find(|l| !l.done_list)).or(ls.first()).map(|l| l.id).ok_or_else(|| "There is no list to put the card in.".to_string())
+}
+
+/// Quick capture (Ctrl+K, the C key) lands in the Inbox when there is one.
+pub fn capture_list(db: &Db) -> Res<i64> {
+    match db.inbox_id() {
+        Some(i) => Ok(i),
+        None => default_list(db),
+    }
 }
 
 pub fn create(db: &Db, n: &NewItem, sample: bool) -> Res<Item> {
@@ -98,8 +121,10 @@ pub fn create_in(db: &Db, n: &NewItem, sample: bool, list_id: i64) -> Res<Item> 
         labels: String::new(),
         checklist: Vec::new(),
         archived: false,
+        cycle: String::new(),
     };
     it.id = db.insert(&it).map_err(e)?;
+    log(db, it.id, &format!("Created in {}", list.name), crate::store::now_local());
     Ok(it)
 }
 
@@ -168,7 +193,15 @@ pub fn place_cards(db: &Db, moves: &[(i64, i64, Option<usize>)], now: NaiveDateT
         let was_done = it.done;
         it.list_id = target.id;
         it.done = target.done_list;
+        if from != target.id {
+            let from_name = db.get_list(from).map_err(e)?.map(|l| l.name).unwrap_or_default();
+            log(db, it.id, &format!("Moved from {from_name} to {}", target.name), now);
+        }
+        if was_done && !it.done {
+            log(db, it.id, "Reopened", now);
+        }
         if it.done && !was_done {
+            log(db, it.id, "Completed", now);
             let cid = db.add_completion(&it.title, it.priority, to_utc(now)).map_err(e)?;
             u.remove_completions.push(cid);
             if let Some(mut copy) = next_copy(&it, now) {
@@ -312,6 +345,11 @@ pub struct CardForm {
 }
 
 pub fn update_card(db: &Db, id: i64, f: &CardForm, now: NaiveDateTime) -> Res<i64> {
+    update_card_ext(db, id, f, None, now)
+}
+
+/// Like `update_card`, plus the weekly cycle choice ("this", "next", "none"; "past" and None keep it).
+pub fn update_card_ext(db: &Db, id: i64, f: &CardForm, cycle: Option<&str>, now: NaiveDateTime) -> Res<i64> {
     let mut it = db.get(id).map_err(e)?.ok_or("That card no longer exists.")?;
     let before = it.clone();
     let title = f.title.trim();
@@ -348,21 +386,52 @@ pub fn update_card(db: &Db, id: i64, f: &CardForm, now: NaiveDateTime) -> Res<i6
     it.has_time = has_time;
     it.deadline = at_local.and_then(|a| if has_time { Some(a) } else { a.date().and_hms_opt(23, 59, 59) }).map(to_utc);
     it.remind_at = remind_at_for(at_local, has_time, f.reminder_min);
+    if let Some(v) = cycle.and_then(|c| extra::cycle_value(c, now.date())) {
+        it.cycle = v;
+    }
     db.put(&it).map_err(e)?;
+    if it.at != before.at || it.has_time != before.has_time {
+        log(db, id, &due_note(it.at_local(), it.has_time), now);
+    }
+    for l in it.label_keys() {
+        if !before.label_keys().contains(&l) {
+            log(db, id, &format!("Label added: {}", extra::label_title(l)), now);
+        }
+    }
+    if it.cycle != before.cycle {
+        log(db, id, &format!("Cycle set to {}", extra::cycle_name(extra::cycle_choice(&it.cycle, now.date())).to_lowercase()), now);
+    }
     undo_push(db, &format!("Edited: {}", it.title), &Undo { restore: vec![before], ..Undo::default() }, now)
 }
+
+/// Change a card's length (the calendar's bottom-edge drag). One free change with Undo.
+pub fn resize_card(db: &Db, id: i64, dur_min: i64, now: NaiveDateTime) -> Res<i64> {
+    let mut it = db.get(id).map_err(e)?.ok_or("That card no longer exists.")?;
+    let before = it.clone();
+    it.dur_min = dur_min.clamp(5, 24 * 60);
+    db.put(&it).map_err(e)?;
+    log(db, id, &format!("Length changed to {} min", it.dur_min), now);
+    undo_push(db, &format!("Length: {}", it.title), &Undo { restore: vec![before], ..Undo::default() }, now)
+}
+
 fn day_has_fixed_event(items: &[Item], skip: i64, day: NaiveDate) -> bool {
     items.iter().any(|x| x.is_event() && !x.done && x.id != skip && x.at_local().map_or(false, |a| a.date() == day))
 }
 
 /// A manual move (drag or "Move to..."). Returns Applied for a single free move, else a Proposal.
 pub fn submit_move(db: &Db, moves: &[(i64, NaiveDateTime)], now: NaiveDateTime) -> Res<Outcome> {
+    let m: Vec<(i64, NaiveDateTime, bool)> = moves.iter().map(|(i, t)| (*i, *t, false)).collect();
+    submit_move_ex(db, &m, now)
+}
+
+/// Same, with an all-day flag per move (a card dropped on a month day or the all-day row).
+pub fn submit_move_ex(db: &Db, moves: &[(i64, NaiveDateTime, bool)], now: NaiveDateTime) -> Res<Outcome> {
     if moves.is_empty() {
         return Err("Nothing to move.".into());
     }
     let items = db.list(false).map_err(e)?;
     let mut mvs = Vec::new();
-    for (id, to) in moves {
+    for (id, to, allday) in moves {
         let it = items.iter().find(|x| x.id == *id).ok_or("That task no longer exists.")?;
         mvs.push(Mv {
             id: *id,
@@ -370,6 +439,7 @@ pub fn submit_move(db: &Db, moves: &[(i64, NaiveDateTime)], now: NaiveDateTime) 
             from: it.at_local().filter(|_| it.has_time),
             to: *to,
             to_day_has_fixed_event: day_has_fixed_event(&items, *id, to.date()),
+            allday: *allday,
         });
     }
     let change = Change::Move { moves: mvs };
@@ -422,15 +492,24 @@ fn apply_moves(db: &Db, moves: &[Mv], auto: bool, now: NaiveDateTime) -> Res<i64
     for m in moves {
         let Some(mut it) = db.get(m.id).map_err(e)? else { continue };
         u.restore.push(it.clone());
-        it.at = Some(to_utc(m.to));
-        if !auto && it.has_time {
-            it.deadline = it.at; // a manual move of a timed item sets its new time as the deadline
+        if m.allday {
+            let day = m.to.date().and_time(NaiveTime::default());
+            it.at = Some(to_utc(day));
+            it.deadline = day.date().and_hms_opt(23, 59, 59).map(to_utc);
+            it.has_time = false;
+            it.remind_at = remind_at_for(Some(day), false, it.reminder_min);
+        } else {
+            it.at = Some(to_utc(m.to));
+            if !auto && it.has_time {
+                it.deadline = it.at; // a manual move of a timed item sets its new time as the deadline
+            }
+            it.has_time = true;
+            it.remind_at = remind_at_for(Some(m.to), true, it.reminder_min);
         }
-        it.has_time = true;
         it.fired = false;
         it.acked = false;
-        it.remind_at = remind_at_for(Some(m.to), true, it.reminder_min);
         db.put(&it).map_err(e)?;
+        log(db, it.id, &due_note(it.at_local(), it.has_time), now);
     }
     if u.restore.is_empty() {
         return Err("Those tasks no longer exist.".into());
@@ -553,6 +632,7 @@ pub fn make_plan(db: &Db, now: NaiveDateTime, only_missed: bool) -> Res<Option<i
                 from: it.at_local().filter(|_| it.has_time),
                 to: s.start,
                 to_day_has_fixed_event: day_has_fixed_event(&items, s.id, s.start.date()),
+                allday: false,
             })
         })
         .collect();
@@ -574,7 +654,8 @@ pub fn load_sample(db: &Db, now: NaiveDateTime) -> Res<usize> {
     }
     let lists = db.lists(false).map_err(e)?;
     let todo = default_list(db)?;
-    let doing = lists.iter().filter(|l| !l.done_list).nth(1).map(|l| l.id).unwrap_or(todo);
+    let inbox = db.inbox_id();
+    let doing = lists.iter().filter(|l| !l.done_list && Some(l.id) != inbox).nth(1).map(|l| l.id).unwrap_or(todo);
     let done = lists.iter().find(|l| l.done_list).map(|l| l.id).unwrap_or(todo);
     let today = now.date();
     let day = |n: i64| today + Duration::days(n);
@@ -964,5 +1045,138 @@ mod tests {
         let Change::Plan { moves } = c else { panic!() };
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].id, late.id);
+    }
+}
+
+#[cfg(test)]
+mod linear_tests {
+    use super::*;
+
+    fn now() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 24).unwrap().and_hms_opt(10, 0, 0).unwrap()
+    }
+    fn plain(title: &str) -> NewItem {
+        NewItem { title: title.into(), is_event: false, date: None, time: None, dur_min: 30, priority: 1, reminder_min: None, repeat: None, until: None }
+    }
+    fn texts(db: &Db, id: i64) -> Vec<String> {
+        db.activity_for(id, 50).unwrap().into_iter().map(|a| a.0).rev().collect()
+    }
+    fn form(c: &Item) -> CardForm {
+        CardForm {
+            title: c.title.clone(),
+            notes: c.notes.clone(),
+            priority: c.priority,
+            labels: c.label_keys().iter().map(|s| s.to_string()).collect(),
+            checklist: c.checklist.clone(),
+            date: c.at_local().map(|a| a.date()),
+            time: c.at_local().filter(|_| c.has_time).map(|a| a.time()),
+            reminder_min: c.reminder_min,
+            repeat: c.repeat.clone(),
+            until: c.until,
+            is_event: c.is_event(),
+            dur_min: c.dur_min,
+        }
+    }
+
+    #[test]
+    fn activity_log_records_created_moved_completed_due_and_label() {
+        let db = Db::memory().unwrap();
+        let c = create(&db, &plain("Pay bill"), false).unwrap();
+        assert_eq!(texts(&db, c.id), ["Created in To do"]);
+        let lists = db.lists(false).unwrap();
+        let (doing, done) = (lists[1].id, lists[2].id);
+        place_cards(&db, &[(c.id, doing, None)], now()).unwrap();
+        assert_eq!(texts(&db, c.id).last().unwrap(), "Moved from To do to Doing");
+        let mut f = form(&db.get(c.id).unwrap().unwrap());
+        f.date = Some(now().date() + Duration::days(1));
+        f.labels = vec!["green".into()];
+        update_card(&db, c.id, &f, now()).unwrap();
+        let t = texts(&db, c.id);
+        assert!(t.contains(&"Due changed to Wed 25 Nov".to_string()), "{t:?}");
+        assert!(t.contains(&"Label added: Money".to_string()), "{t:?}");
+        update_card(&db, c.id, &f, now()).unwrap(); // saving again changes nothing, so logs nothing
+        assert_eq!(texts(&db, c.id).len(), t.len());
+        complete(&db, c.id, now()).unwrap();
+        let t = texts(&db, c.id);
+        assert_eq!(&t[t.len() - 2..], ["Moved from Doing to Done", "Completed"]);
+        place_cards(&db, &[(c.id, doing, None)], now()).unwrap();
+        assert_eq!(texts(&db, c.id).last().unwrap(), "Reopened");
+        let _ = done;
+        // calendar drags log the new time; removing the date is logged too
+        submit_move(&db, &[(c.id, now().date().and_hms_opt(15, 0, 0).unwrap())], now()).unwrap();
+        assert_eq!(texts(&db, c.id).last().unwrap(), "Due changed to Tue 24 Nov, 3:00 PM");
+        let mut f = form(&db.get(c.id).unwrap().unwrap());
+        f.date = None;
+        f.time = None;
+        update_card(&db, c.id, &f, now()).unwrap();
+        assert_eq!(texts(&db, c.id).last().unwrap(), "Due date removed");
+    }
+
+    #[test]
+    fn card_lengths_default_to_30_and_resize_with_undo() {
+        let db = Db::memory().unwrap();
+        let c = create(&db, &plain("Write"), false).unwrap();
+        assert_eq!(c.dur_min, 30);
+        let u = resize_card(&db, c.id, 90, now()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().dur_min, 90);
+        assert_eq!(texts(&db, c.id).last().unwrap(), "Length changed to 90 min");
+        undo(&db, u).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().dur_min, 30);
+        resize_card(&db, c.id, 1, now()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().dur_min, 5, "never shorter than 5 minutes");
+        resize_card(&db, c.id, 99_999, now()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().dur_min, 1440);
+    }
+
+    #[test]
+    fn weekly_cycle_is_saved_logged_and_undone() {
+        let db = Db::memory().unwrap();
+        let c = create(&db, &plain("Plan"), false).unwrap();
+        let f = form(&c);
+        let u = update_card_ext(&db, c.id, &f, Some("this"), now()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().cycle, "2026-11-23");
+        assert_eq!(texts(&db, c.id).last().unwrap(), "Cycle set to this week");
+        update_card_ext(&db, c.id, &f, Some("past"), now()).unwrap(); // "past" keeps what is stored
+        assert_eq!(db.get(c.id).unwrap().unwrap().cycle, "2026-11-23");
+        update_card_ext(&db, c.id, &f, Some("next"), now()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().cycle, "2026-11-30");
+        update_card_ext(&db, c.id, &f, Some("none"), now()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().cycle, "");
+        undo(&db, u).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().cycle, "");
+    }
+
+    #[test]
+    fn inbox_is_added_once_at_the_left_and_quick_capture_lands_there() {
+        let db = Db::memory().unwrap();
+        db.ensure_inbox().unwrap();
+        db.ensure_inbox().unwrap();
+        let names: Vec<String> = db.lists(false).unwrap().into_iter().map(|l| l.name).collect();
+        assert_eq!(names, ["Inbox", "To do", "Doing", "Done"]);
+        let inbox = db.inbox_id().unwrap();
+        assert_eq!(capture_list(&db).unwrap(), inbox);
+        assert_ne!(default_list(&db).unwrap(), inbox, "the add boxes and repeat copies still use To do");
+        let c = create_in(&db, &plain("Quick"), false, capture_list(&db).unwrap()).unwrap();
+        assert_eq!(db.get(c.id).unwrap().unwrap().list_id, inbox);
+        assert_eq!(texts(&db, c.id), ["Created in Inbox"]);
+        // the sample board does not put cards in the Inbox
+        load_sample(&db, now()).unwrap();
+        assert!(db.cards_in(inbox).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn a_card_dropped_on_a_month_day_stays_all_day_and_big_changes_still_ask() {
+        let db = Db::memory().unwrap();
+        let c = create(&db, &plain("Loose"), false).unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 27).unwrap().and_hms_opt(0, 0, 0).unwrap();
+        submit_move_ex(&db, &[(c.id, day, true)], now()).unwrap();
+        let g = db.get(c.id).unwrap().unwrap();
+        assert!(!g.has_time);
+        assert_eq!(g.at_local(), Some(day));
+        // three cards at once still wait for Approve
+        let ids: Vec<i64> = (0..3).map(|i| create(&db, &plain(&format!("T{i}")), false).unwrap().id).collect();
+        let mv: Vec<(i64, NaiveDateTime, bool)> = ids.iter().map(|i| (*i, day, false)).collect();
+        assert!(matches!(submit_move_ex(&db, &mv, now()).unwrap(), Outcome::Proposal(_)));
+        assert!(db.get(ids[0]).unwrap().unwrap().at.is_none(), "nothing written before Approve");
     }
 }

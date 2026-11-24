@@ -62,6 +62,9 @@ pub struct Item {
     pub checklist: Vec<Check>,
     #[serde(default)]
     pub archived: bool,
+    /// Weekly cycle: the Monday (YYYY-MM-DD) of the week the card belongs to, or "".
+    #[serde(default)]
+    pub cycle: String,
 }
 
 /// The colour labels a card can carry.
@@ -137,7 +140,7 @@ pub struct Db {
     pub conn: Connection,
 }
 
-const COLS: &str = "id,title,kind,at,has_time,dur_min,deadline,priority,reminder_min,remind_at,fired,acked,repeat,until,done,sample,list_id,pos,notes,labels,checklist,archived";
+const COLS: &str = "id,title,kind,at,has_time,dur_min,deadline,priority,reminder_min,remind_at,fired,acked,repeat,until,done,sample,list_id,pos,notes,labels,checklist,archived,cycle";
 
 fn row_item(r: &Row) -> rusqlite::Result<Item> {
     let repeat: Option<String> = r.get(12)?;
@@ -165,12 +168,15 @@ fn row_item(r: &Row) -> rusqlite::Result<Item> {
         labels: r.get(19)?,
         checklist: r.get::<_, String>(20).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         archived: r.get::<_, i64>(21)? != 0,
+        cycle: r.get(22)?,
     })
 }
 
 impl Db {
     pub fn open(path: &str) -> rusqlite::Result<Db> {
-        Db::init(Connection::open(path)?)
+        let db = Db::init(Connection::open(path)?)?;
+        db.ensure_inbox()?;
+        Ok(db)
     }
     pub fn memory() -> rusqlite::Result<Db> {
         Db::init(Connection::open_in_memory()?)
@@ -184,7 +190,10 @@ impl Db {
                fired INTEGER NOT NULL DEFAULT 0, acked INTEGER NOT NULL DEFAULT 0, repeat TEXT, until TEXT,
                done INTEGER NOT NULL DEFAULT 0, sample INTEGER NOT NULL DEFAULT 0,
                list_id INTEGER NOT NULL DEFAULT 0, pos INTEGER NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '',
-               labels TEXT NOT NULL DEFAULT '', checklist TEXT NOT NULL DEFAULT '[]', archived INTEGER NOT NULL DEFAULT 0);
+               labels TEXT NOT NULL DEFAULT '', checklist TEXT NOT NULL DEFAULT '[]', archived INTEGER NOT NULL DEFAULT 0,
+               cycle TEXT NOT NULL DEFAULT '');
+             CREATE TABLE IF NOT EXISTS activity(
+               id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS lists(
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, pos INTEGER NOT NULL DEFAULT 0,
                archived INTEGER NOT NULL DEFAULT 0, done_list INTEGER NOT NULL DEFAULT 0);
@@ -206,6 +215,7 @@ impl Db {
             ("labels", "TEXT NOT NULL DEFAULT ''"),
             ("checklist", "TEXT NOT NULL DEFAULT '[]'"),
             ("archived", "INTEGER NOT NULL DEFAULT 0"),
+            ("cycle", "TEXT NOT NULL DEFAULT ''"),
         ] {
             if !have.iter().any(|h| h == col) {
                 conn.execute(&format!("ALTER TABLE items ADD COLUMN {col} {ddl}"), [])?;
@@ -241,13 +251,13 @@ impl Db {
     pub fn put(&self, it: &Item) -> rusqlite::Result<()> {
         let id: Option<i64> = if it.id == 0 { None } else { Some(it.id) };
         self.conn.execute(
-            "INSERT OR REPLACE INTO items(id,title,kind,at,has_time,dur_min,deadline,priority,reminder_min,remind_at,fired,acked,repeat,until,done,sample,list_id,pos,notes,labels,checklist,archived)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO items(id,title,kind,at,has_time,dur_min,deadline,priority,reminder_min,remind_at,fired,acked,repeat,until,done,sample,list_id,pos,notes,labels,checklist,archived,cycle)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 id, it.title, it.kind, it.at, it.has_time, it.dur_min, it.deadline, it.priority, it.reminder_min, it.remind_at,
                 it.fired, it.acked, it.repeat.as_ref().and_then(|r| serde_json::to_string(r).ok()),
                 it.until.map(|d| d.format("%Y-%m-%d").to_string()), it.done, it.sample,
-                it.list_id, it.pos, it.notes, it.labels, serde_json::to_string(&it.checklist).unwrap_or_else(|_| "[]".into()), it.archived
+                it.list_id, it.pos, it.notes, it.labels, serde_json::to_string(&it.checklist).unwrap_or_else(|_| "[]".into()), it.archived, it.cycle
             ],
         )?;
         Ok(())
@@ -286,6 +296,35 @@ impl Db {
             .query_map(params![from, to], |r| Ok(Completion { title: r.get(0)?, priority: r.get(1)?, done_at: r.get(2)? }))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ---- activity log ----
+    pub fn log_activity(&self, item_id: i64, text: &str, at: i64) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT INTO activity(item_id,text,at) VALUES(?,?,?)", params![item_id, text, at])?;
+        Ok(())
+    }
+    /// Newest first: (text, UTC seconds).
+    pub fn activity_for(&self, item_id: i64, limit: i64) -> rusqlite::Result<Vec<(String, i64)>> {
+        let mut st = self.conn.prepare("SELECT text,at FROM activity WHERE item_id=? ORDER BY id DESC LIMIT ?")?;
+        let rows = st.query_map(params![item_id, limit], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ---- inbox ----
+    /// Make sure there is an "Inbox" list at the left. Runs once per database (an old database is
+    /// migrated in place; archiving the Inbox later is respected).
+    pub fn ensure_inbox(&self) -> rusqlite::Result<()> {
+        if self.meta("inbox_id").is_some() {
+            return Ok(());
+        }
+        let first = self.lists(true)?.iter().map(|l| l.pos).min().unwrap_or(0);
+        let id = self.put_list(&ListRow { id: 0, name: "Inbox".into(), pos: first - 1, archived: false, done_list: false })?;
+        self.set_meta("inbox_id", &id.to_string())
+    }
+    /// The Inbox list, when it exists and is not archived.
+    pub fn inbox_id(&self) -> Option<i64> {
+        let id: i64 = self.meta("inbox_id")?.parse().ok()?;
+        self.get_list(id).ok().flatten().filter(|l| !l.archived).map(|l| l.id)
     }
 
     // ---- lists and card order ----

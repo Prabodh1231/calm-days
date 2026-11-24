@@ -1,4 +1,5 @@
 //! HTTP routes. Bound to 127.0.0.1 only (see main.rs).
+use crate::extra;
 use crate::ops::{self, NewItem, Outcome};
 use crate::parser;
 use crate::repeat::Repeat;
@@ -59,6 +60,8 @@ pub fn router(shared: Shared) -> Router {
         .route("/api/tasks", post(api_save))
         .route("/api/now", get(api_now))
         .route("/api/cards/move", post(api_card_move))
+        .route("/api/cards/index", get(api_card_index))
+        .route("/api/cards/:id/resize", post(api_card_resize))
         .route("/api/cards/:id", get(api_card_get))
         .route("/api/cards/:id/update", post(api_card_update))
         .route("/api/cards/:id/archive", post(api_card_archive))
@@ -113,9 +116,9 @@ async fn index(State(s): State<Shared>) -> Html<String> {
 async fn calendar(State(s): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Html<String> {
     let db = lock(&s);
     let now = now_local();
-    let week = q.get("view").map_or(true, |v| v != "day");
+    let view = q.get("view").map(String::as_str).unwrap_or("week");
     let date = q.get("date").and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).unwrap_or(now.date());
-    Html(view::calendar_page(&board_name(&db), &db.list(false).unwrap_or_default(), week, date, now))
+    Html(crate::calview::calendar_page(&board_name(&db), &db.list(false).unwrap_or_default(), view, date, now))
 }
 
 async fn plan_page(State(s): State<Shared>) -> Html<String> {
@@ -130,7 +133,12 @@ async fn summary(State(s): State<Shared>) -> Html<String> {
     let (w, _) = day_range(now.date() - Duration::days(6), 1);
     let today = db.completions_between(a, b).unwrap_or_default();
     let week = db.completions_between(w, b).unwrap_or_default();
-    Html(view::summary_page(&board_name(&db), &db.list(false).unwrap_or_default(), &today, &week, now))
+    // "Not started" for the Pulse: the Inbox and the first open list (To do).
+    let lists = db.lists(false).unwrap_or_default();
+    let inbox = db.inbox_id();
+    let mut not_started: Vec<i64> = inbox.into_iter().collect();
+    not_started.extend(lists.iter().filter(|l| !l.done_list && Some(l.id) != inbox).map(|l| l.id).take(1));
+    Html(view::summary_page_with(&board_name(&db), &db.list(true).unwrap_or_default(), &today, &week, &not_started, now))
 }
 async fn js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../assets/app.js"))
@@ -224,7 +232,7 @@ async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
     let db = lock(&s);
     let list = match r.list_id {
         Some(l) => l,
-        None => ops::default_list(&db).map_err(bad)?,
+        None => ops::capture_list(&db).map_err(bad)?,
     };
     let it = ops::create_in(&db, &n, false, list).map_err(bad)?;
     let undo = db
@@ -237,6 +245,7 @@ async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
 async fn api_card_get(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
     let db = lock(&s);
     let it = db.get(id).map_err(bad)?.ok_or_else(|| bad("That card no longer exists."))?;
+    let now = now_local();
     let index = db.cards_in(it.list_id).map_err(bad)?.iter().position(|c| c.id == id).unwrap_or(0);
     let a = it.at_local();
     Ok(Json(json!({
@@ -248,7 +257,33 @@ async fn api_card_get(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
         "repeat": it.repeat.as_ref().map(crate::repeat::describe).unwrap_or_default(),
         "until": it.until.map(|d| d.format("%Y-%m-%d").to_string()),
         "kind": it.kind, "dur_min": it.dur_min, "list_id": it.list_id, "index": index, "done": it.done,
+        "cid": extra::short_id(it.id),
+        "cycle": extra::cycle_choice(&it.cycle, now.date()),
+        "suggest": extra::suggest_labels(&it.title, &it.notes, &it.label_keys().iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+        "activity": db.activity_for(id, 30).unwrap_or_default().iter().map(|(t, at)| json!({ "text": t, "ago": extra::ago(to_utc(now), *at) })).collect::<Vec<_>>(),
     })))
+}
+
+/// Every open card with its short id, for the command menu.
+async fn api_card_index(State(s): State<Shared>) -> ApiRes {
+    let db = lock(&s);
+    let lists = db.lists(false).map_err(bad)?;
+    let mut out = Vec::new();
+    for l in &lists {
+        for c in db.cards_in(l.id).map_err(bad)? {
+            out.push(json!({ "id": c.id, "cid": extra::short_id(c.id), "title": c.title, "list": l.name, "list_id": l.id, "done": c.done }));
+        }
+    }
+    Ok(Json(json!({ "cards": out, "lists": lists.iter().map(|l| json!({ "id": l.id, "name": l.name })).collect::<Vec<_>>() })))
+}
+
+#[derive(Deserialize)]
+struct ResizeReq {
+    dur_min: i64,
+}
+async fn api_card_resize(State(s): State<Shared>, Path(id): Path<i64>, Json(r): Json<ResizeReq>) -> ApiRes {
+    let u = ops::resize_card(&lock(&s), id, r.dur_min, now_local()).map_err(bad)?;
+    Ok(outcome(Outcome::Applied(u), "Length changed."))
 }
 
 #[derive(Deserialize)]
@@ -265,6 +300,7 @@ struct CardReq {
     until: Option<String>,
     kind: Option<String>,
     dur_min: Option<i64>,
+    cycle: Option<String>,
 }
 async fn api_card_update(State(s): State<Shared>, Path(id): Path<i64>, Json(r): Json<CardReq>) -> ApiRes {
     let now = now_local();
@@ -283,7 +319,7 @@ async fn api_card_update(State(s): State<Shared>, Path(id): Path<i64>, Json(r): 
         is_event: r.kind.as_deref() == Some("event"),
         dur_min: r.dur_min.unwrap_or(30),
     };
-    let u = ops::update_card(&lock(&s), id, &f, now).map_err(bad)?;
+    let u = ops::update_card_ext(&lock(&s), id, &f, r.cycle.as_deref(), now).map_err(bad)?;
     Ok(outcome(Outcome::Applied(u), "Saved."))
 }
 async fn api_card_archive(State(s): State<Shared>, Path(id): Path<i64>) -> ApiRes {
@@ -393,6 +429,7 @@ async fn api_delete(State(s): State<Shared>, Json(r): Json<DeleteReq>) -> ApiRes
 struct MoveItem {
     id: i64,
     to: String,
+    allday: Option<bool>,
 }
 #[derive(Deserialize)]
 struct MoveReq {
@@ -401,9 +438,9 @@ struct MoveReq {
 async fn api_move(State(s): State<Shared>, Json(r): Json<MoveReq>) -> ApiRes {
     let mut mv = Vec::new();
     for m in &r.moves {
-        mv.push((m.id, parse_dt(&m.to)?));
+        mv.push((m.id, parse_dt(&m.to)?, m.allday.unwrap_or(false)));
     }
-    Ok(outcome(ops::submit_move(&lock(&s), &mv, now_local()).map_err(bad)?, "Moved."))
+    Ok(outcome(ops::submit_move_ex(&lock(&s), &mv, now_local()).map_err(bad)?, "Moved."))
 }
 
 #[derive(Deserialize)]

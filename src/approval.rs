@@ -10,6 +10,9 @@ pub struct Mv {
     pub to: NaiveDateTime,
     /// The target day already holds a fixed event.
     pub to_day_has_fixed_event: bool,
+    /// Keep the card as an all-day card on the target day (no time).
+    #[serde(default)]
+    pub allday: bool,
 }
 
 /// One card going to a list (and a place in it). Names are kept for the approval list.
@@ -67,7 +70,7 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, 0, 0).unwrap()
     }
     fn mv(id: i64, from: u32, to: u32, fixed: bool) -> Mv {
-        Mv { id, title: "t".into(), from: Some(at(from, 10)), to: at(to, 15), to_day_has_fixed_event: fixed }
+        Mv { id, title: "t".into(), from: Some(at(from, 10)), to: at(to, 15), to_day_has_fixed_event: fixed, allday: false }
     }
 
     #[test]
@@ -87,7 +90,7 @@ mod tests {
         assert!(needs_approval(&Change::Move { moves: vec![mv(1, 1, 20, false)] }));
         assert!(needs_approval(&Change::Move { moves: vec![mv(1, 24, 25, true)] }));
         // exactly 7 days and 5 hours is more than 7 days; exactly 7 days is not
-        let exact = Mv { id: 1, title: "t".into(), from: Some(at(1, 10)), to: at(8, 10), to_day_has_fixed_event: false };
+        let exact = Mv { id: 1, title: "t".into(), from: Some(at(1, 10)), to: at(8, 10), to_day_has_fixed_event: false, allday: false };
         assert!(!needs_approval(&Change::Move { moves: vec![exact] }));
     }
 
