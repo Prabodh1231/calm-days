@@ -1,3 +1,11 @@
 /target
 /.scratch
 /data
+.scratch/
+target/
+data/
+srv.out
+srv.err
+*.db
+node_modules/
+reports/
