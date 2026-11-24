@@ -1,4 +1,4 @@
-//! "Smart text reading": a hand-written rule reader for plain sentences. It runs offline.
+//! The rule reader: hand-written rules for plain sentences. It runs offline and is the backup for the AI reader (ai.rs).
 //! No regex, no AI. It never panics; unknown words stay in the title.
 //!
 //! Rules worth knowing (also shown in the README and the UI):

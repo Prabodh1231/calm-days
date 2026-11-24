@@ -313,3 +313,16 @@ body.cal-dragging{cursor:grabbing;user-select:none}
 }
 
 .pside .two>div{min-width:0}.pside input,.pside select{min-width:0;width:100%}
+
+/* AI reader: chips, title box in the preview, settings dialog */
+.prev .chip.src{font-weight:700;letter-spacing:.02em}
+.prev .chip.src.ai{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.prev .chip.src.rules{background:var(--list);color:var(--muted)}
+.prev .chip.fromai{border-style:dashed}
+.prev input.titlebox{display:inline-block;width:100%;max-width:100%;font:inherit;font-size:.85rem;padding:2px 7px;margin:0 0 2px;border:1px solid var(--line);border-radius:5px;background:var(--card);color:var(--ink)}
+.aiform{margin-top:8px}.aiform label{display:block;font-size:.9rem;color:var(--muted)}
+.aiform .aion{display:flex;gap:8px;align-items:center;color:var(--ink);margin-bottom:10px;font-size:1rem}
+.aiform .aion input{width:auto;margin:0}
+#ai-dialog{width:440px}
+#ai-status.bad{color:var(--warn)}#ai-status.good{color:var(--lo)}
+.cmdk-prev{display:flex;flex-direction:column;gap:6px;padding:8px 12px;white-space:normal}

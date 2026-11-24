@@ -1,4 +1,5 @@
 //! HTTP routes. Bound to 127.0.0.1 only (see main.rs).
+use crate::ai;
 use crate::extra;
 use crate::ops::{self, NewItem, Outcome};
 use crate::parser;
@@ -57,6 +58,9 @@ pub fn router(shared: Shared) -> Router {
         .route("/static/app.js", get(js))
         .route("/static/style.css", get(css))
         .route("/api/parse", post(api_parse))
+        .route("/api/ai", get(api_ai_get).post(api_ai_set))
+        .route("/api/ai/check", post(api_ai_check))
+        .route("/api/ai/warm", post(api_ai_warm))
         .route("/api/tasks", post(api_save))
         .route("/api/now", get(api_now))
         .route("/api/cards/move", post(api_card_move))
@@ -151,8 +155,58 @@ async fn css() -> impl IntoResponse {
 struct ParseReq {
     text: String,
 }
-async fn api_parse(Json(r): Json<ParseReq>) -> Json<Value> {
-    Json(parser::parse(&r.text, now_local()).to_json())
+/// Read one sentence. The model call runs on a blocking thread and holds no lock on the database.
+async fn api_parse(State(s): State<Shared>, Json(r): Json<ParseReq>) -> Json<Value> {
+    let st = ai::load_settings(&lock(&s));
+    let text: String = r.text.chars().take(parser::MAX_INPUT_CHARS).collect();
+    let out = tokio::task::spawn_blocking(move || {
+        let model = if st.on { ai::Ollama::new(&st) } else { None };
+        ai::read(model.as_ref().map(|m| m as &dyn ai::Reader), &text, now_local()).to_json()
+    })
+    .await;
+    Json(out.unwrap_or_else(|_| json!({ "error": "Could not read that sentence." })))
+}
+
+fn settings_json(st: &ai::Settings) -> Value {
+    json!({ "on": st.on, "model": st.model, "url": st.url, "default_model": ai::DEFAULT_MODEL, "default_url": ai::DEFAULT_URL })
+}
+async fn api_ai_get(State(s): State<Shared>) -> Json<Value> {
+    Json(settings_json(&ai::load_settings(&lock(&s))))
+}
+#[derive(Deserialize)]
+struct AiReq {
+    on: bool,
+    model: String,
+    url: String,
+}
+async fn api_ai_set(State(s): State<Shared>, Json(r): Json<AiReq>) -> ApiRes {
+    let model = r.model.trim();
+    let url = r.url.trim().trim_end_matches('/');
+    if !ai::valid_model(model) {
+        return Err(bad("The model name needs letters, numbers and . : _ - / only (80 at most)."));
+    }
+    if ai::local_host_port(url).is_none() {
+        return Err(bad("The address must be on this computer: http://127.0.0.1:11434 or http://localhost:11434"));
+    }
+    let db = lock(&s);
+    db.set_meta("ai_on", if r.on { "1" } else { "0" }).map_err(bad)?;
+    db.set_meta("ai_model", model).map_err(bad)?;
+    db.set_meta("ai_url", url).map_err(bad)?;
+    Ok(Json(json!({ "status": "ok", "message": "AI settings saved.", "settings": settings_json(&ai::load_settings(&db)) })))
+}
+/// Is Ollama running, and is the model installed?
+async fn api_ai_check(State(s): State<Shared>) -> Json<Value> {
+    let st = ai::load_settings(&lock(&s));
+    let (running, has) = tokio::task::spawn_blocking(move || ai::check(&st)).await.unwrap_or((false, false));
+    Json(json!({ "running": running, "model_installed": has }))
+}
+/// Load the model into memory when the user starts typing a card. Answers at once.
+async fn api_ai_warm(State(s): State<Shared>) -> Json<Value> {
+    let st = ai::load_settings(&lock(&s));
+    if st.on {
+        std::thread::spawn(move || ai::warm(&st));
+    }
+    Json(json!({ "status": "ok" }))
 }
 
 #[derive(Deserialize)]
@@ -167,6 +221,8 @@ struct SaveReq {
     dur_min: Option<i64>,
     kind: Option<String>,
     list_id: Option<i64>,
+    /// Colour keys from the reader. Unknown ones are ignored.
+    labels: Option<Vec<String>>,
 }
 
 fn nz(o: &Option<String>) -> Option<&str> {
@@ -234,7 +290,19 @@ async fn api_save(State(s): State<Shared>, Json(r): Json<SaveReq>) -> ApiRes {
         Some(l) => l,
         None => ops::capture_list(&db).map_err(bad)?,
     };
-    let it = ops::create_in(&db, &n, false, list).map_err(bad)?;
+    let mut it = ops::create_in(&db, &n, false, list).map_err(bad)?;
+    let mut keys: Vec<&str> = Vec::new();
+    for l in r.labels.iter().flatten() {
+        if let Some(k) = crate::store::LABELS.iter().find(|k| **k == l.as_str()) {
+            if !keys.contains(k) {
+                keys.push(k);
+            }
+        }
+    }
+    if !keys.is_empty() {
+        it.labels = keys.join(",");
+        db.put(&it).map_err(bad)?;
+    }
     let undo = db
         .add_undo(&format!("Added: {}", it.title), &Undo { remove_items: vec![it.id], ..Undo::default() }, to_utc(now))
         .map_err(bad)?;

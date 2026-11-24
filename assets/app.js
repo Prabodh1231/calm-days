@@ -179,32 +179,58 @@
     return p.time ? s + ', ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : s;
   }
   var PRI = ['Low', 'Medium', 'High'];
+  var LNAME = { green: 'Money', red: 'Health', blue: 'People', purple: 'Work', orange: 'Home', yellow: 'Ideas' };
+  // The chips for one reading. Text goes in with textContent. Dashed chips came from the AI; the first chip says who read it.
+  function chipsFor(p, add) {
+    var ai = p.ai_fields || [];
+    var from = function (k) { return ai.indexOf(k) >= 0 ? 'fromai' : ''; };
+    var secs = typeof p.ms === 'number' ? (p.ms / 1000).toFixed(1) + ' s' : '';
+    if (p.source === 'ai') {
+      add('AI', 'src ai', 'Read by the small AI on your computer (' + secs + '). Dashed chips came from the AI. Check them before you save.');
+    } else {
+      add('rules', 'src rules', 'Read by simple rules' + (p.reason ? ' (' + p.reason + ')' : '') + '. Check the chips before you save.');
+    }
+    if (p.date) { add('Due ' + fmtDate(p), from('date') + ' ' + from('time')); } else { add('No date found', 'warnchip'); }
+    add('Priority: ' + PRI[p.priority], from('priority'));
+    if (p.repeat) { add('Repeats: ' + p.repeat, from('repeat')); }
+    if (p.reminder_min === -1) { add('No reminder', from('reminder')); } else if (p.date) { add(p.reminder_text || 'Reminder: 10 min before', from('reminder')); }
+    if (p.dur_min && p.date && p.time) { add(p.dur_min + ' min', from('duration')); }
+    (p.labels || []).forEach(function (l) { add('Label: ' + (LNAME[l] || l), from('labels')); });
+    if (p.kind === 'event') { add('Fixed event'); }
+    (p.notes || []).forEach(function (n) { add(n, 'warnchip'); });
+  }
   function showPreview(form, p) {
     var pv = $('.prev', form);
     pv.textContent = '';
-    var add = function (t, cls) { pv.appendChild(el('span', { class: 'chip' + (cls ? ' ' + cls : ''), text: t })); };
-    add(p.title || '(no title)');
-    if (p.date) { add('Due ' + fmtDate(p)); } else { add('No date found', 'warnchip'); }
-    add('Priority: ' + PRI[p.priority]);
-    if (p.repeat) { add('Repeats: ' + p.repeat); }
-    if (p.reminder_min === -1) { add('No reminder'); } else if (p.date) { add(p.reminder_text || 'Reminder: 10 min before'); }
-    if (p.kind === 'event') { add('Fixed event'); }
-    (p.notes || []).forEach(function (n) { add(n, 'warnchip'); });
+    var add = function (t, cls, tip) {
+      var c = el('span', { class: 'chip' + (cls && cls.trim() ? ' ' + cls.trim() : ''), text: t });
+      if (tip) { c.title = tip; }
+      pv.appendChild(c);
+    };
+    // The title is a box you can change before saving.
+    var tb = el('input', { type: 'text', class: 'titlebox', maxlength: '200', 'aria-label': 'Card title (you can change it)' });
+    tb.value = p.title || '';
+    tb.addEventListener('input', function () { p.title = tb.value; });
+    pv.appendChild(tb);
+    chipsFor(p, add);
     form._parsed = p;
     form._text = $('.add-text', form).value;
     $('.add-save', form).hidden = false;
   }
+  var warmed = false;
+  function warmAi() { if (!warmed) { warmed = true; api('/api/ai/warm', {}).catch(function () { /* optional */ }); } }
   function readCard(form) {
     var v = $('.add-text', form).value.trim();
     if (!v) { toast('Type a sentence first, for example: Remind me to call John tomorrow at 5 PM'); return; }
-    api('/api/parse', { text: v }).then(function (p) { showPreview(form, p); }).catch(fail);
+    var pv = $('.prev', form); pv.textContent = ''; pv.appendChild(el('span', { class: 'chip', text: 'Reading your sentence...' }));
+    api('/api/parse', { text: v }).then(function (p) { showPreview(form, p); }).catch(function (e) { pv.textContent = ''; fail(e); });
   }
   function saveCard(form) {
     var p = form._parsed;
     if (!p) { return; }
     api('/api/tasks', {
       title: p.title, date: p.date, time: p.time, priority: p.priority, reminder_min: p.reminder_min,
-      repeat: p.repeat || null, until: p.until, dur_min: p.dur_min, kind: p.kind,
+      repeat: p.repeat || null, until: p.until, dur_min: p.dur_min, kind: p.kind, labels: p.labels || [],
       list_id: parseInt($('.add-open', form.parentNode).dataset.list, 10)
     }).then(function (r) {
       return refresh('Card added.', r.undo).then(function () {
@@ -441,7 +467,7 @@
     if (b) {
       var c = b.classList;
       if (c.contains('add-open')) {
-        var f = $('.add-form', b.parentNode); f.hidden = false; b.hidden = true; $('.add-text', f).focus();
+        var f = $('.add-form', b.parentNode); f.hidden = false; b.hidden = true; $('.add-text', f).focus(); warmAi();
       } else if (c.contains('add-read')) { readCard(b.closest('.add-form'));
       } else if (c.contains('add-save')) { saveCard(b.closest('.add-form'));
       } else if (c.contains('add-cancel')) { closeAdder(b.closest('.add-form'));
@@ -664,7 +690,22 @@
   }
   function paintCk() {
     var q = ckIn.value.trim(), rows = [];
-    if (ckMode === 'capture') {
+    if (ckMode === 'preview') {
+      if (!ckPrev) {
+        rows.push({ label: 'Reading your sentence...', hint: '', run: function () {} });
+      } else {
+        var box = el('div', { class: 'cmdk-prev prev' });
+        var tb = el('input', { type: 'text', class: 'titlebox', maxlength: '200', 'aria-label': 'Card title (you can change it)' });
+        tb.value = ckPrev.title || '';
+        tb.addEventListener('input', function () { ckPrev.title = tb.value; });
+        tb.addEventListener('keydown', function (e) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); saveCapture(ckPrev); } else if (e.key === 'Escape') { closeCk(); } });
+        box.appendChild(tb);
+        chipsFor(ckPrev, function (t, cls, tip) { var c = el('span', { class: 'chip' + (cls && cls.trim() ? ' ' + cls.trim() : ''), text: t }); if (tip) { c.title = tip; } box.appendChild(c); });
+        rows.push({ node: box, run: function () {} });
+        rows.push({ label: 'Add to the Inbox', hint: 'Enter', run: function () { saveCapture(ckPrev); } });
+        rows.push({ label: 'Back: change the sentence', hint: '', run: function () { ckMode = 'capture'; ckPrev = null; ckSel = 0; paintCk(); ckIn.focus(); } });
+      }
+    } else if (ckMode === 'capture') {
       rows.push({ label: q ? 'Add "' + q + '" to the Inbox' : 'Type a sentence, then press Enter', hint: 'Inbox', run: function () { if (q) { captureCard(q); } } });
     } else if (ckMode === 'move') {
       ckData.lists.forEach(function (l) {
@@ -687,7 +728,7 @@
     if (ckSel >= rows.length) { ckSel = 0; }
     ckList.textContent = '';
     rows.forEach(function (r, i) {
-      var li = el('li', { role: 'option', 'aria-selected': i === ckSel ? 'true' : 'false', class: i === ckSel ? 'sel' : '' }, [el('span', { text: r.label }), el('span', { class: 'muted', text: r.hint || '' })]);
+      var li = el('li', { role: 'option', 'aria-selected': i === ckSel ? 'true' : 'false', class: i === ckSel ? 'sel' : '' }, r.node ? [r.node] : [el('span', { text: r.label }), el('span', { class: 'muted', text: r.hint || '' })]);
       li.addEventListener('mousedown', function (e) { e.preventDefault(); ckSel = i; r.run(); });
       ckList.appendChild(li);
     });
@@ -695,18 +736,30 @@
   }
   function openCk(mode) {
     ck.hidden = false; ckSel = 0; ckMoveId = selectedId();
+    if (mode === 'capture') { warmAi(); }
     ckData = { cards: [], lists: [] };
     setMode(mode || 'main');
     api('/api/cards/index').then(function (r) { ckData = r; paintCk(); }).catch(function () { /* menu still works */ });
   }
   function closeCk() { ck.hidden = true; }
   function captureCard(text) {
-    closeCk();
+    // Read first, show the chips, save only when the user presses Enter on "Add to the Inbox".
+    ckMode = 'preview'; ckPrev = null; ckSel = 0;
+    ckIn.value = text; ckIn.placeholder = '';
+    ckRows = [{ label: 'Reading your sentence...', hint: '', run: function () {} }];
+    paintCk();
     api('/api/parse', { text: text }).then(function (p) {
-      return api('/api/tasks', { title: p.title, date: p.date, time: p.time, priority: p.priority, reminder_min: p.reminder_min, repeat: p.repeat || null, until: p.until, dur_min: p.dur_min, kind: p.kind });
-    }).then(function (r) { return refresh('Added to your Inbox.', r.undo); }).catch(fail);
+      if (ck.hidden) { return; }
+      ckPrev = p; ckSel = 1; paintCk();
+    }).catch(function (e) { closeCk(); fail(e); });
   }
-  ckIn.addEventListener('input', function () { ckSel = 0; paintCk(); });
+  function saveCapture(p) {
+    closeCk();
+    api('/api/tasks', { title: p.title, date: p.date, time: p.time, priority: p.priority, reminder_min: p.reminder_min, repeat: p.repeat || null, until: p.until, dur_min: p.dur_min, kind: p.kind, labels: p.labels || [] })
+      .then(function (r) { return refresh('Added to your Inbox.', r.undo); }).catch(fail);
+  }
+  var ckPrev = null;
+  ckIn.addEventListener('input', function () { if (ckMode === 'preview') { ckMode = 'capture'; ckPrev = null; } ckSel = 0; paintCk(); });
   ckIn.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowDown') { e.preventDefault(); ckSel = Math.min(ckRows.length - 1, ckSel + 1); paintCk(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); ckSel = Math.max(0, ckSel - 1); paintCk(); }
@@ -716,6 +769,32 @@
   ck.addEventListener('mousedown', function (e) { if (e.target === ck) { closeCk(); } });
   $('#cmdk-btn').addEventListener('click', function () { openCk(); });
   $('#help-close').addEventListener('click', function () { closeDlg($('#help-dialog')); });
+
+  // ---- AI reader settings ----
+  var aiDlg = $('#ai-dialog'), aiSt = $('#ai-status');
+  function aiSay(t, cls) { aiSt.textContent = t; aiSt.className = 'muted' + (cls ? ' ' + cls : ''); }
+  $('#ai-btn').addEventListener('click', function () {
+    aiSay('');
+    api('/api/ai').then(function (s) {
+      $('#ai-on').checked = !!s.on; $('#ai-model').value = s.model; $('#ai-url').value = s.url;
+      openDlg(aiDlg);
+    }).catch(fail);
+  });
+  $('#ai-close').addEventListener('click', function () { closeDlg(aiDlg); });
+  function aiSave() {
+    return api('/api/ai', { on: $('#ai-on').checked, model: $('#ai-model').value, url: $('#ai-url').value });
+  }
+  $('#ai-save').addEventListener('click', function () {
+    aiSave().then(function () { aiSay('Saved.', 'good'); warmed = false; }).catch(function (e) { aiSay(e.message, 'bad'); });
+  });
+  $('#ai-check').addEventListener('click', function () {
+    aiSay('Checking...');
+    aiSave().then(function () { return api('/api/ai/check', {}); }).then(function (r) {
+      if (!r.running) { aiSay('Ollama is not running, so the simple rules will be used. Start Ollama, then check again.', 'bad'); }
+      else if (!r.model_installed) { aiSay('Ollama is running but this model is not installed. In a terminal run: ollama pull ' + $('#ai-model').value, 'bad'); }
+      else { aiSay('Ready. Ollama is running and the model is installed.', 'good'); }
+    }).catch(function (e) { aiSay(e.message, 'bad'); });
+  });
 
   // ---- keyboard shortcuts ----
   var gPending = false, gTimer;

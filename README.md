@@ -20,9 +20,26 @@ A Trello-style board. Lists (To do, Doing, Done to start) hold cards. Drag cards
 
 Asks first: moving 3 or more cards at once, archiving a list that has cards, deleting events or series, and every planner proposal. One drag gets a 10-second Undo.
 
-## "Smart text reading" is rules, not AI
+## Sentence reader: small local AI, with simple rules as the backup
 
-The reader works offline with hand-written rules. It can be wrong, so always check the chips. Rules:
+Calm Days reads your sentence with a small AI on your computer (Ollama). Falls back to simple rules. Nothing leaves your computer: the app talks only to 127.0.0.1 or localhost.
+
+The AI only reads the sentence and suggests title, date, time, priority, reminder, repeat and labels. You see them as chips (a dashed chip came from the AI), you can change them, and nothing is saved until you press Add. It never moves, deletes or changes cards you already have. Every field it returns is checked by Rust. A bad or missing field uses the rules' value for that field. If Ollama is off, the model is missing or it does not answer in about 4 seconds, the rules answer and the preview shows a small "rules" chip. A small "AI" chip means the model answered.
+
+Install the model once (free, about 1 GB):
+
+1. Install Ollama from https://ollama.com
+2. In a terminal run: `ollama pull qwen3.5:0.8b`
+3. In Calm Days open "AI reader" in the top bar, press "Check it works".
+
+Settings (top bar, "AI reader"): on/off, model name (default `qwen3.5:0.8b`), Ollama address (default `http://127.0.0.1:11434`, only this computer is allowed). They are stored in the database. To free memory run `ollama stop qwen3.5:0.8b`; Ollama also unloads the model by itself after about 5 minutes.
+
+The small model is weaker than the rules on dates, times and repeats, so the app lets the rules win there and uses the model for labels, a cleaner title, priority words, duration and sentences the rules cannot read. See `reports/ai-build.md` for measured results.
+
+## The rule reader
+
+The rules work offline. They can be wrong, so always check the chips.
+Rules:
 
 - Numeric dates are day-first: `12/11` is 12 November.
 - A time with no am/pm: 1 to 6 means PM, 7 to 11 means AM ("at 5" is 5 PM, "at 9" is 9 AM).

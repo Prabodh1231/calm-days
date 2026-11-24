@@ -72,6 +72,7 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
 <div class="tools"><button id="cmdk-btn" type="button" class="cmdk-btn" aria-label="Open the command menu (Ctrl+K)">Search or jump <kbd>Ctrl K</kbd></button>
 <button id="now-btn" type="button" class="primary">What should I do now?</button>
 <a class="btn" href="/plan"{plan_cur}>Planner</a>
+<button id="ai-btn" type="button" aria-label="AI reader settings">AI reader</button>
 <button id="theme" type="button" aria-label="Switch between light and dark mode">Dark mode</button></div></header>
 <div id="banner" role="status" aria-live="polite"></div>
 <main>{body}</main>
@@ -92,6 +93,14 @@ pub fn page(board: &str, title: &str, active: &str, body: &str) -> String {
 <label for="ma-list">Move them to</label><select id="ma-list"></select>
 <div class="row"><button id="ma-ok" type="button" class="primary">Move all</button><button id="ma-cancel" type="button">Cancel</button></div>
 </form></dialog>
+<dialog id="ai-dialog" aria-labelledby="ai-h"><h2 id="ai-h">AI reader</h2>
+<p>Reads your sentence with a small AI on your computer (Ollama). Falls back to simple rules.</p>
+<p class="muted">It only suggests the title, date, time, priority, reminder, repeat and labels. You still press Add. It never changes cards you already have.</p>
+<div class="aiform"><label class="aion"><input id="ai-on" type="checkbox"> Use the AI reader</label>
+<label for="ai-model">Model name</label><input id="ai-model" type="text" maxlength="80" autocomplete="off" spellcheck="false">
+<label for="ai-url">Ollama address (this computer only)</label><input id="ai-url" type="text" maxlength="60" autocomplete="off" spellcheck="false"></div>
+<p id="ai-status" class="muted" role="status" aria-live="polite"></p>
+<div class="row"><button id="ai-save" type="button" class="primary">Save</button><button id="ai-check" type="button">Check it works</button><button id="ai-close" type="button">Close</button></div></dialog>
 <dialog id="now-dialog"><h2>What should I do now?</h2><div id="now-body"></div>
 <div class="row"><button id="now-open" type="button" class="primary" hidden>Open card</button><button id="now-done" type="button" hidden>Mark done</button><button id="now-close" type="button">Close</button></div></dialog>
 <dialog id="confirm-dialog" aria-labelledby="confirm-h"><h2 id="confirm-h">Please confirm</h2>
@@ -231,6 +240,7 @@ pub fn board_page(board: &str, lists: &[ListRow], cards: &[Item], pending: usize
 <div class="adder"><button type="button" class="add-open" data-list="{id}">+ Add a card</button>
 <div class="add-form" hidden><textarea class="add-text" rows="2" maxlength="500" placeholder="Try: Remind me to call John tomorrow at 5 PM" aria-label="Describe the card in a plain sentence"></textarea>
 <div class="prev" aria-live="polite"></div>
+<p class="muted aihint">Reads your sentence with a small AI on your computer (Ollama). Falls back to simple rules.</p>
 <div class="row"><button type="button" class="add-read primary">Read it</button><button type="button" class="add-save primary" hidden>Add card</button><button type="button" class="add-cancel">Cancel</button></div></div></div>
 </section>"##,
             id = l.id,
