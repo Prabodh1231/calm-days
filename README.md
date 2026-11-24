@@ -71,7 +71,7 @@ Then open http://127.0.0.1:3000. The app opens with a sample board so you can tr
 cargo test -j 2
 ```
 
-98 tests pass. None of them need Ollama.
+103 tests pass. None of them need Ollama.
 
 ## Tech stack
 

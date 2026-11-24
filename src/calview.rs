@@ -318,13 +318,15 @@ fn agenda_view(items: &[&Item], loose: &[&Item], date: NaiveDate, today: NaiveDa
 pub fn calendar_page(board: &str, items: &[Item], view: &str, date: NaiveDate, now: NaiveDateTime) -> String {
     let view = VIEWS.iter().map(|v| v.0).find(|v| *v == view).unwrap_or("week");
     let today = now.date();
+    // dates far from today would overflow date maths below: use today instead
+    let date = if (1900..=2200).contains(&date.year()) { date } else { today };
     let open: Vec<&Item> = items.iter().filter(|i| !i.done && !i.archived).collect();
     let dated: Vec<&Item> = open.iter().copied().filter(|i| i.at.is_some()).collect();
     let loose: Vec<&Item> = open.iter().copied().filter(|i| i.at.is_none()).collect();
     let main = match view {
         "month" => month_view(&dated, date, today),
         "week" => time_grid(&dated, week_start(date), 7, today, now),
-        "day" => time_grid(&dated, date, 1, today, now),
+        "day" => format!("{}{}", if on_day(&dated, date).is_empty() { "<p class=\"muted dayempty\">Nothing planned.</p>" } else { "" }, time_grid(&dated, date, 1, today, now)),
         _ => agenda_view(&dated, &loose, date, today),
     };
     let seg: String = VIEWS
@@ -332,7 +334,7 @@ pub fn calendar_page(board: &str, items: &[Item], view: &str, date: NaiveDate, n
         .map(|(v, name)| format!("<a href=\"{}\"{}>{name}</a>", link(v, date), if *v == view { " aria-current=\"true\"" } else { "" }))
         .collect();
     let un: String = if loose.is_empty() {
-        "<p class=\"muted\">Every card has a date.</p>".into()
+        "<p class=\"muted\">All your cards have a date.</p>".into()
     } else {
         let rows: String = loose
             .iter()
@@ -340,10 +342,10 @@ pub fn calendar_page(board: &str, items: &[Item], view: &str, date: NaiveDate, n
             .map(|i| format!("<div class=\"un-item pdrag {}\" data-id=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"Open card: {t}\">{t}</div>", color(i), i.id, t = esc(&i.title)))
             .collect();
         let extra = if loose.len() > 12 { format!("<p class=\"muted\">+{} more on the board</p>", loose.len() - 12) } else { String::new() };
-        format!("<div class=\"un-list\">{rows}</div>{extra}")
+        format!("<p class=\"muted\">Drag one onto the calendar to plan it.</p><div class=\"un-list\">{rows}</div>{extra}")
     };
     let body = format!(
-        "<h1 class=\"sr\">Calendar</h1><div class=\"calwrap\"><aside class=\"calside\" aria-label=\"Calendar sidebar\">{mini}<h2 class=\"un-h\">Not scheduled</h2><p class=\"muted\">Drag a card onto the calendar.</p>{un}</aside>
+        "<h1 class=\"sr\">Calendar</h1><div class=\"calwrap\"><aside class=\"calside\" aria-label=\"Calendar sidebar\">{mini}<h2 class=\"un-h\">Cards without a date</h2>{un}</aside>
 <section class=\"calmain\"><div class=\"caltop\"><div class=\"row\"><a class=\"btn\" href=\"{today_l}\">Today</a><a class=\"btn arrow\" href=\"{prev}\" aria-label=\"Previous\">&#8249;</a><a class=\"btn arrow\" href=\"{next}\" aria-label=\"Next\">&#8250;</a><h2 class=\"caltitle\" aria-live=\"polite\">{title}</h2></div>
 <nav class=\"seg\" aria-label=\"Calendar view\">{seg}</nav></div>{main}</section></div>",
         mini = mini_month(view, date, today, &dated),
@@ -487,6 +489,18 @@ mod tests {
         let h = calendar_page("b", &items, "agenda", today(), now());
         assert!(h.contains("Thursday 26 November") && h.contains("4:30 PM - 5:30 PM") && h.contains("Nothing planned."));
         assert!(h.contains("Not scheduled yet") && h.contains("Read 20 pages"));
+    }
+
+    #[test]
+    fn a_date_far_away_does_not_crash_the_page() {
+        for far in [NaiveDate::MAX, NaiveDate::MIN, NaiveDate::from_ymd_opt(262_000, 6, 1).unwrap()] {
+            for v in ["month", "week", "day", "agenda"] {
+                let h = calendar_page("b", &[], v, far, now());
+                assert!(h.contains("2026"), "{v} falls back to today");
+            }
+        }
+        let h = calendar_page("b", &[], "day", today(), now());
+        assert!(h.contains("Nothing planned."));
     }
 }
 

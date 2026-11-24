@@ -27,6 +27,8 @@ pub struct Parsed {
     pub repeat: Option<Repeat>,
     pub until: Option<NaiveDate>,
     pub dur_min: i64,
+    /// true when the sentence itself gave the length ("for 2 hours", "from 10 to 11:30")
+    pub dur_set: bool,
     pub is_event: bool,
     pub notes: Vec<String>,
 }
@@ -42,6 +44,7 @@ impl Parsed {
             "repeat": self.repeat.as_ref().map(repeat::describe).unwrap_or_default(),
             "until": self.until.map(|d| d.format("%Y-%m-%d").to_string()),
             "dur_min": self.dur_min,
+            "dur_set": self.dur_set,
             "kind": if self.is_event { "event" } else { "task" },
             "notes": self.notes,
             "reminder_text": self.reminder_text(),
@@ -188,6 +191,7 @@ impl P {
         let text: String = text.chars().take(MAX_INPUT_CHARS).collect::<String>().replace('@', " at ");
         let mut t = Vec::new();
         let mut in_q = false;
+        let text = split_ranges(&text);
         for w in text.split_whitespace() {
             let opens = w.starts_with('"') || w.starts_with('“');
             let closes = w.chars().count() > 1 && (w.ends_with('"') || w.ends_with('”'));
@@ -303,6 +307,78 @@ impl P {
             }
         };
         Some(TimeHit { time: hm(hh, m)?, n, midnight: false, note })
+    }
+
+    // ---------- time range ----------
+    /// One clock word for a range: hour, minute, am/pm if given, and how many tokens it uses.
+    fn clock(&self, i: usize) -> Option<(u32, u32, Option<bool>, usize)> {
+        let s = self.w(i);
+        let (body, mut pm) = if let Some(b) = s.strip_suffix("pm") {
+            (b, Some(true))
+        } else if let Some(b) = s.strip_suffix("am") {
+            (b, Some(false))
+        } else {
+            (s, None)
+        };
+        if body.is_empty() || !body.chars().all(|c| c.is_ascii_digit() || c == ':') || body.matches(':').count() > 1 {
+            return None;
+        }
+        let mut n = 1;
+        if pm.is_none() {
+            match self.w(i + 1) {
+                "pm" => {
+                    pm = Some(true);
+                    n = 2
+                }
+                "am" => {
+                    pm = Some(false);
+                    n = 2
+                }
+                _ => {}
+            }
+        }
+        let (hs, ms) = body.split_once(':').unwrap_or((body, "0"));
+        if hs.is_empty() || hs.len() > 2 || ms.is_empty() || ms.len() > 2 {
+            return None;
+        }
+        let (h, m): (u32, u32) = (hs.parse().ok()?, ms.parse().ok()?);
+        if m > 59 || h > 23 || (pm.is_some() && !(1..=12).contains(&h)) {
+            return None;
+        }
+        Some((h, m, pm, n))
+    }
+
+    /// "from 10 to 11:30", "10am-11:30am", "between 2 and 4": start time, end time and tokens used.
+    fn range_at(&self, i: usize) -> Option<(NaiveTime, NaiveTime, usize)> {
+        let from = matches!(self.w(i), "from" | "between");
+        let a_at = if from { i + 1 } else { i };
+        let (ah, am, apm, an) = self.clock(a_at)?;
+        let sep = a_at + an;
+        if !(matches!(self.w(sep), "to" | "until" | "till" | "-" | "–") || (self.w(i) == "between" && self.w(sep) == "and")) {
+            return None;
+        }
+        let (bh, bm, bpm, bn) = self.clock(sep + 1)?;
+        let clocky = |s: usize, n: usize| n == 2 || self.w(s).contains(':') || self.w(s).ends_with("am") || self.w(s).ends_with("pm");
+        if !from && !clocky(a_at, an) && !clocky(sep + 1, bn) {
+            return None; // "10 to 11" alone is not a time
+        }
+        let bare = |h: u32| if h == 0 || h >= 12 { h } else if h <= 6 { h + 12 } else { h };
+        let h24 = |h: u32, pm: bool| h % 12 + if pm { 12 } else { 0 };
+        let (sh, eh) = match (apm, bpm) {
+            (Some(a), Some(b)) => (h24(ah, a), h24(bh, b)),
+            (None, Some(b)) => {
+                let (s, e) = (h24(ah % 12, b), h24(bh, b));
+                if s * 60 + am < e * 60 + bm { (s, e) } else { (ah % 12, e) } // "9-5pm" starts at 9 AM
+            }
+            (Some(a), None) => {
+                let s = h24(ah, a);
+                let e = if bh < 12 { h24(bh, a) } else { bh };
+                if e * 60 + bm > s * 60 + am { (s, e) } else { (s, if bh < 12 { bh + 12 } else { bh }) }
+            }
+            (None, None) => (bare(ah), bare(bh)),
+        };
+        let (st, en) = (hm(sh, am)?, hm(eh, bm)?);
+        (en > st).then_some((st, en, sep + 1 + bn - i))
     }
 
     // ---------- date ----------
@@ -569,6 +645,61 @@ impl P {
     }
 }
 
+/// Turn "10-11:30" and "10am-11:30am" into "10 to 11:30" so the range reader sees them.
+/// A bare "10-11" counts only after "from", "between" or "at" (otherwise it may be a date).
+fn split_ranges(text: &str) -> String {
+    fn clock_like(s: &str) -> Option<bool> {
+        let s = s.to_lowercase();
+        let (body, mer) = match s.strip_suffix("am").or_else(|| s.strip_suffix("pm")) {
+            Some(b) => (b.to_string(), true),
+            None => (s.clone(), false),
+        };
+        let (h, m) = body.split_once(':').map_or((body.as_str(), None), |(h, m)| (h, Some(m)));
+        let ok = !h.is_empty() && h.len() <= 2 && h.chars().all(|c| c.is_ascii_digit()) && m.map_or(true, |m| m.len() == 2 && m.chars().all(|c| c.is_ascii_digit()));
+        ok.then_some(mer || m.is_some())
+    }
+    let mut out: Vec<String> = Vec::new();
+    for w in text.split_whitespace() {
+        let prev = out.last().map(|p| p.to_lowercase()).unwrap_or_default();
+        let parts: Vec<&str> = w.split(|c| c == '-' || c == '–').collect();
+        if let [a, b] = parts.as_slice() {
+            if let (Some(x), Some(y)) = (clock_like(a), clock_like(b)) {
+                if x || y || matches!(prev.as_str(), "from" | "between" | "at") {
+                    out.extend([a.to_string(), "to".into(), b.to_string()]);
+                    continue;
+                }
+            }
+        }
+        out.push(w.to_string());
+    }
+    out.join(" ")
+}
+
+/// A day that no year has, such as "30 February" or "April 31". Returns the words as typed.
+pub fn impossible_date(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let day = |w: &str| -> Option<u32> {
+        let l = w.to_lowercase();
+        let d = l.trim_end_matches(|c: char| c.is_alphabetic());
+        (d.len() <= 2 && matches!(&l[d.len()..], "" | "st" | "nd" | "rd" | "th")).then(|| d.parse().ok()).flatten()
+    };
+    let max = |m: u32| match m {
+        2 => 29,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    for pair in words.windows(2) {
+        let (d, m) = match (day(pair[0]), month_num(&pair[1].to_lowercase()), month_num(&pair[0].to_lowercase()), day(pair[1])) {
+            (Some(d), Some(m), _, _) | (_, _, Some(m), Some(d)) => (d, m),
+            _ => continue,
+        };
+        if d > max(m) && d < 100 {
+            return Some(format!("{} {}", pair[0], pair[1]));
+        }
+    }
+    None
+}
+
 const PREPS: [&str; 10] = ["at", "on", "by", "for", "in", "due", "from", "until", "till", "before"];
 
 fn is_event_word(title_low: &str) -> bool {
@@ -704,6 +835,19 @@ pub fn parse(text: &str, now: NaiveDateTime) -> Parsed {
             }
         }
     }
+    // time range: "from 10 to 11:30" starts at 10:00 and lasts 90 minutes
+    let mut ranged = false;
+    if !explicit {
+        for i in 0..p.t.len() {
+            if let Some((st, en, n)) = p.range_at(i) {
+                time = Some(st);
+                dur_min.get_or_insert((en - st).num_minutes());
+                p.mark(i, n);
+                ranged = true;
+                break;
+            }
+        }
+    }
     if date.is_none() {
         for i in 0..p.t.len() {
             if let Some(h) = p.date_at(i) {
@@ -716,7 +860,7 @@ pub fn parse(text: &str, now: NaiveDateTime) -> Parsed {
             }
         }
     }
-    if time.is_none() || !explicit {
+    if (time.is_none() || !explicit) && !ranged {
         for i in 0..p.t.len() {
             if let Some(h) = p.time_at(i) {
                 time = Some(h.time);
@@ -841,7 +985,12 @@ pub fn parse(text: &str, now: NaiveDateTime) -> Parsed {
         notes.push("No title found. Type one in the title box.".into());
     }
 
-    let is_event = time.is_some() && is_event_word(&title.to_lowercase());
+    let is_event = time.is_some() && (ranged || is_event_word(&title.to_lowercase()));
+    if date.is_none() {
+        if let Some(what) = impossible_date(text) {
+            notes.push(format!("I could not read the date \"{what}\". Pick a date in the card."));
+        }
+    }
     Parsed {
         title,
         date,
@@ -851,6 +1000,7 @@ pub fn parse(text: &str, now: NaiveDateTime) -> Parsed {
         repeat,
         until,
         dur_min: dur_min.unwrap_or(if is_event { 60 } else { 30 }),
+        dur_set: dur_min.is_some(),
         is_event,
         notes,
     }
@@ -1099,5 +1249,38 @@ mod tests {
         assert_eq!(parse("call John tomorrow at 5 PM", now).reminder_text().as_deref(), Some("Reminder: 10 min before"));
         assert_eq!(parse("pay rent tomorrow", now).reminder_text().as_deref(), Some("Reminder: 9:00 AM that day"));
         assert_eq!(parse("buy milk", now).reminder_text(), None);
+    }
+
+    #[test]
+    fn time_ranges_start_at_the_first_time_and_set_the_length() {
+        for s in [
+            "Meeting with Sara on Monday from 10 to 11:30",
+            "Meeting with Sara on Monday 10-11:30",
+            "Meeting with Sara on Monday 10am-11:30am",
+            "Meeting with Sara on Monday from 10:00 until 11:30 am",
+        ] {
+            let r = p(s);
+            assert_eq!(r.title, "Meeting with Sara", "{s}");
+            assert_eq!(r.date, Some(d(2026, 11, 23)), "{s}"); // "Monday" on a Monday is today
+            assert_eq!(r.time, at(10, 0), "{s}");
+            assert_eq!(r.dur_min, 90, "{s}");
+            assert!(r.dur_set && r.is_event, "{s}");
+        }
+        assert_eq!(p("Study tomorrow from 2 to 4").time, at(14, 0));
+        assert_eq!(p("Work tomorrow 9-5pm").time, at(9, 0));
+        assert_eq!(p("Work tomorrow 9-5pm").dur_min, 480);
+        // a plain date is not a time range
+        assert_eq!(p("Pay rent on 2026-12-01").time, None);
+        assert_eq!(p("Read pages 10-11").time, None);
+    }
+
+    #[test]
+    fn impossible_dates_get_no_date_and_a_plain_note() {
+        let r = p("Submit tax form on 30 February");
+        assert_eq!(r.date, None);
+        assert!(r.notes.iter().any(|n| n.contains("could not read the date") && n.contains("30 February")), "{:?}", r.notes);
+        assert!(impossible_date("April 31 party").is_some());
+        assert!(impossible_date("Party on 29 February").is_none());
+        assert!(impossible_date("Pay in March 2027").is_none());
     }
 }

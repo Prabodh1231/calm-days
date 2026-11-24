@@ -269,7 +269,7 @@ pub fn board_page(board: &str, lists: &[ListRow], cards: &[Item], pending: usize
     let (cyc_done, cyc_total) = crate::extra::cycle_stats(cards, today);
     let next_n = cards.iter().filter(|c| !c.archived && crate::extra::cycle_choice(&c.cycle, today) == "next").count();
     let cycle_bar = if cyc_total == 0 {
-        format!("<div class=\"cyclebar\"><b>This week</b><span class=\"muted\">{}</span><span class=\"muted\">Next week: {next_n}</span></div>", if cards.is_empty() { "No cards yet. Open a card and set <i>Cycle</i> to plan your week." } else { "None of your cards are in this week yet. Open a card and set <i>Cycle</i> to add it." })
+        format!("<div class=\"cyclebar\"><b>This week</b><span class=\"muted\">{}</span><span class=\"muted\">Next week: {next_n}</span></div>", if cards.is_empty() { "No cards yet. Open a card and set <i>Plan for</i> to <i>This week</i>." } else { "None of your cards are in this week yet. Open a card and set <i>Plan for</i> to <i>This week</i> to add it." })
     } else {
         format!(
             "<div class=\"cyclebar\"><b>This week</b><span>{cyc_done} of {cyc_total} done</span><div class=\"bar2\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"{cyc_total}\" aria-valuenow=\"{cyc_done}\" aria-label=\"This week's cycle\"><i style=\"width:{}%\"></i></div><span class=\"muted\">Next week: {next_n}</span></div>",

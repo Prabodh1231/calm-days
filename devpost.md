@@ -19,7 +19,7 @@ The AI never changes cards by itself. Big changes (moving 3 or more cards, archi
 - Rust with Axum for the server, SQLite for storage, plain HTML and CSS from the server, and a small JavaScript file for drag and drop.
 - The model answers in a fixed JSON schema through Ollama.
 - Rust checks every field the model returns. A bad date, repeat or reminder is dropped, and the rule reader's value is used instead.
-- 98 automated tests, none of which need the model.
+- 103 automated tests, none of which need the model.
 - The app only talks to 127.0.0.1, so nothing leaves the PC.
 
 ## Challenges

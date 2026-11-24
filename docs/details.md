@@ -22,7 +22,7 @@ Install the model once (free, about 1 GB):
 
 Settings (top bar, "AI reader"): on/off, model name (default `qwen3.5:0.8b`), Ollama address (default `http://127.0.0.1:11434`, only this computer is allowed). They are stored in the database. To free memory run `ollama stop qwen3.5:0.8b`; Ollama also unloads the model by itself after about 5 minutes.
 
-The small model is weaker than the rules on dates, times and repeats, so the app lets the rules win there and uses the model for labels, a cleaner title, priority words, duration and sentences the rules cannot read. See `reports/ai-build.md` for measured results.
+The small model is weaker than the rules on dates, times and repeats, so the app lets the rules win there and uses the model for labels, a cleaner title, priority words, duration and sentences the rules cannot read.
 
 ## The rule reader
 
@@ -68,7 +68,6 @@ Drag and drop uses mouse events and does not work by touch. Use **Move to...** o
 
 - A repeating task is one item that jumps to its next date when you mark it done. The calendar shows only the next one.
 - Working hours for the planner are fixed at 9:00 to 18:00.
-- Not tested in a real browser by the builder (see `reports/build.md`).
 
 ## Test
 

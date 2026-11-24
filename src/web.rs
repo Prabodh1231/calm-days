@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -230,7 +230,7 @@ fn nz(o: &Option<String>) -> Option<&str> {
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate, (StatusCode, Json<Value>)> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| bad("The date looks wrong. Use the date box."))
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().filter(|d| (1900..=2200).contains(&d.year())).ok_or_else(|| bad("The date looks wrong. Use the date box."))
 }
 
 fn parse_dt(s: &str) -> Result<NaiveDateTime, (StatusCode, Json<Value>)> {

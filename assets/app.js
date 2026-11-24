@@ -174,7 +174,9 @@
   function fmtDate(p) {
     if (!p.date) { return ''; }
     var d = new Date(p.date + 'T' + (p.time || '00:00'));
-    var s = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    var o = { weekday: 'short', day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== new Date().getFullYear()) { o.year = 'numeric'; }
+    var s = d.toLocaleDateString(undefined, o);
     return p.time ? s + ', ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : s;
   }
   var PRI = ['Low', 'Medium', 'High'];
@@ -189,7 +191,11 @@
     } else {
       add('rules', 'src rules', 'Read by simple rules' + (p.reason ? ' (' + p.reason + ')' : '') + '. Check the chips before you save.');
     }
-    if (p.source !== 'ai' && p.reason) { add('AI is not ready yet. Open AI reader and press Check, then try again.', 'warnchip'); }
+    if (p.source !== 'ai' && p.reason) {
+      if (/reader is off/.test(p.reason)) { add('AI is off, so simple rules were used.', 'warnchip'); }
+      else if (/nothing usable|could not use/.test(p.reason)) { add('AI could not read this one, rules were used.', 'warnchip'); }
+      else { add('AI is not ready yet. Open AI reader and press Check, then try again.', 'warnchip'); }
+    }
     if (p.date) { add('Due ' + fmtDate(p), from('date') + ' ' + from('time')); } else { add('No date found', 'warnchip'); }
     add('Priority: ' + PRI[p.priority], from('priority'));
     if (p.repeat) { add('Repeats: ' + p.repeat, from('repeat')); }
@@ -326,7 +332,7 @@
     side.appendChild(field('Priority', pri, 'p-pri'));
     var date = el('input', { type: 'date' }); date.value = c.date || '';
     var time = el('input', { type: 'time' }); time.value = c.time || '';
-    side.appendChild(el('div', { class: 'two' }, [field('Due date', date, 'p-date'), field('Due time', time, 'p-time')]));
+    side.appendChild(el('div', { class: 'two stack' }, [field('Due date', date, 'p-date'), field('Due time', time, 'p-time')]));
     var dur = el('input', { type: 'number', min: '5', max: '1440', step: '5' }); dur.value = c.dur_min;
     side.appendChild(field('Length (minutes)', dur, 'p-dur'));
     // labels with names, plus suggestions that only apply when accepted
@@ -361,9 +367,9 @@
     var rem = el('select', {}, [option('', 'Default', c.reminder_min === null), option('5', '5 min before', c.reminder_min === 5), option('30', '30 min before', c.reminder_min === 30),
       option('60', '1 hour before', c.reminder_min === 60), option('1440', '1 day before', c.reminder_min === 1440), option('-1', 'No reminder', c.reminder_min === -1)]);
     side.appendChild(field('Reminder', rem, 'p-rem'));
-    var cyc = el('select', {}, [option('none', 'No cycle', c.cycle === ''), option('this', 'This week', c.cycle === 'this'), option('next', 'Next week', c.cycle === 'next')]);
+    var cyc = el('select', {}, [option('none', 'Not planned', c.cycle === ''), option('this', 'This week', c.cycle === 'this'), option('next', 'Next week', c.cycle === 'next')]);
     if (c.cycle === 'past' || c.cycle === 'later') { cyc.appendChild(option('past', c.cycle === 'past' ? 'Earlier week' : 'Later week', true)); }
-    side.appendChild(field('Cycle', cyc, 'p-cycle'));
+    side.appendChild(field('Plan for', cyc, 'p-cycle'));
     var kind = el('input', { type: 'checkbox', id: 'p-kind' }); kind.checked = c.kind === 'event';
     side.appendChild(el('label', { for: 'p-kind' }, [kind, el('span', { text: ' Fixed event (the planner never moves it)' })]));
 

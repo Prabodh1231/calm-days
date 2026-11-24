@@ -324,7 +324,7 @@ fn has_any(text: &str, words: &[&str]) -> bool {
     low.split(|c: char| !c.is_alphanumeric()).any(|w| words.contains(&w))
 }
 fn has_date_cue(text: &str) -> bool {
-    text.chars().any(|c| c.is_ascii_digit())
+    text.split_whitespace().any(|w| w.chars().any(|c| c.is_ascii_digit()) && w.contains(|c| c == '/' || c == '-' || c == '.'))
         || has_any(text, &["today", "tonight", "tomorrow", "week", "weekend", "month", "year", "next", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "mon", "tue", "wed", "thu", "fri", "sat", "sun", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec", "january", "february", "march", "april", "june", "july", "august", "september", "october", "november", "december", "daily", "weekday", "weekdays", "every", "later"])
 }
 fn has_time_cue(text: &str) -> bool {
@@ -347,7 +347,7 @@ pub fn merge(rules: Parsed, answer: &Value, text: &str, now: NaiveDateTime, ms: 
     let mut used: Vec<&'static str> = Vec::new();
     let today = now.date();
 
-    // Measured on this 0.8B model (reports/ai-build.md): the rules read dates, times, repeats and reminders better, so the model
+    // Measured on this 0.8B model: the rules read dates, times, repeats and reminders better, so the model
     // only fills those when the rules found nothing. Its title counts only when it is not longer than the rules' title.
     if let Some(t) = clean_title(&answer["title"]).filter(|t| t.chars().count() <= rules.title.chars().count()) {
         if t != rules.title {
@@ -359,7 +359,7 @@ pub fn merge(rules: Parsed, answer: &Value, text: &str, now: NaiveDateTime, ms: 
     let mut ai_date = None;
     if let Some(d) = present(&answer["date"]).and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()) {
         // A small model often answers "today" when the sentence names no day: ask for a cue in the sentence.
-        if d >= today && d <= today + Duration::days(3650) && (d != today || has_any(text, &["today", "tonight", "now"])) && has_date_cue(text) && rules.date.is_none() {
+        if d >= today && d <= today + Duration::days(3650) && (d != today || has_any(text, &["today", "tonight", "now"])) && has_date_cue(text) && rules.date.is_none() && parser::impossible_date(text).is_none() {
             ai_date = Some(d);
         }
     }
@@ -397,7 +397,7 @@ pub fn merge(rules: Parsed, answer: &Value, text: &str, now: NaiveDateTime, ms: 
         p.repeat = Some(r);
         used.push("repeat");
     }
-    if let Some(n) = answer["duration_min"].as_i64().filter(|n| (5..=1440).contains(n)) {
+    if let Some(n) = answer["duration_min"].as_i64().filter(|n| (5..=1440).contains(n) && !rules.dur_set) {
         p.dur_min = n;
         used.push("duration");
     }
@@ -617,5 +617,22 @@ mod tests {
         let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
         let o = Ollama { model: "m".into(), host_port: free, secs: 1 };
         assert_eq!(o.ask("s", "u", &json!({})), Err(ReadErr::Down));
+    }
+
+    #[test]
+    fn ai_cannot_invent_a_date_or_change_a_range() {
+        let a = r#"{"title":"Submit tax form","date":"2026-11-25","time":"18:00","all_day":false,"priority":"medium","reminder_min":null,"repeat":null,"labels":[],"duration_min":60}"#;
+        let r = run(a, "Submit tax form on 30 February");
+        assert_eq!(r.parsed.date, None);
+        assert!(!r.ai_fields.contains(&"date") && !r.ai_fields.contains(&"time"));
+        assert!(r.parsed.notes.iter().any(|n| n.contains("could not read the date")));
+        // the rules' time range wins over the model's time and length
+        let a = r#"{"title":"Meeting with Sara","date":"2026-11-30","time":"11:30","all_day":false,"priority":"medium","reminder_min":null,"repeat":null,"labels":[],"duration_min":60}"#;
+        let r = run(a, "Meeting with Sara on Monday from 10 to 11:30");
+        assert_eq!(r.parsed.time, NaiveTime::from_hms_opt(10, 0, 0));
+        assert_eq!(r.parsed.dur_min, 90);
+        // no date cue at all: a model date is refused
+        let a = r#"{"title":"Buy 5 apples","date":"2026-11-25","time":null,"all_day":false,"priority":"medium","reminder_min":null,"repeat":null,"labels":[],"duration_min":null}"#;
+        assert_eq!(run(a, "Buy 5 apples").parsed.date, None);
     }
 }
