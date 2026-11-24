@@ -190,6 +190,7 @@
     } else {
       add('rules', 'src rules', 'Read by simple rules' + (p.reason ? ' (' + p.reason + ')' : '') + '. Check the chips before you save.');
     }
+    if (p.source !== 'ai' && p.reason) { add('AI is not ready yet. Open AI reader and press Check, then try again.', 'warnchip'); }
     if (p.date) { add('Due ' + fmtDate(p), from('date') + ' ' + from('time')); } else { add('No date found', 'warnchip'); }
     add('Priority: ' + PRI[p.priority], from('priority'));
     if (p.repeat) { add('Repeats: ' + p.repeat, from('repeat')); }
@@ -778,6 +779,7 @@
     api('/api/ai').then(function (s) {
       $('#ai-on').checked = !!s.on; $('#ai-model').value = s.model; $('#ai-url').value = s.url;
       openDlg(aiDlg);
+      if (s.on) { aiCheck(); }
     }).catch(fail);
   });
   $('#ai-close').addEventListener('click', function () { closeDlg(aiDlg); });
@@ -787,15 +789,17 @@
   $('#ai-save').addEventListener('click', function () {
     aiSave().then(function () { aiSay('Saved.', 'good'); warmed = false; }).catch(function (e) { aiSay(e.message, 'bad'); });
   });
-  $('#ai-check').addEventListener('click', function () {
-    aiSay('Checking...');
-    aiSave().then(function () { return api('/api/ai/check', {}); }).then(function (r) {
-      if (!r.running) { aiSay('Ollama is not running, so the simple rules will be used. Start Ollama, then check again.', 'bad'); }
+  function aiCheck() {
+    aiSay('Checking the AI. If Ollama is off, it is being started (up to 15 seconds)...');
+    return api('/api/ai/check', {}).then(function (r) {
+      if (!r.running) { aiSay('AI is off: Ollama is not running and could not be started. Install it from ollama.com or open the Ollama app, then press Check again. Until then simple rules read your sentences.', 'bad'); }
       else if (!r.model_installed) { aiSay('Ollama is running but this model is not installed. In a terminal run: ollama pull ' + $('#ai-model').value, 'bad'); }
-      else { aiSay('Ready. Ollama is running and the model is installed.', 'good'); }
+      else { aiSay('AI is ready. Ollama is running and the model is installed.', 'good'); }
     }).catch(function (e) { aiSay(e.message, 'bad'); });
+  }
+  $('#ai-check').addEventListener('click', function () {
+    aiSave().then(aiCheck).catch(function (e) { aiSay(e.message, 'bad'); });
   });
-
   // ---- keyboard shortcuts ----
   var gPending = false, gTimer;
   document.addEventListener('keydown', function (e) {

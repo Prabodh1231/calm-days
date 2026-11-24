@@ -197,7 +197,7 @@ async fn api_ai_set(State(s): State<Shared>, Json(r): Json<AiReq>) -> ApiRes {
 /// Is Ollama running, and is the model installed?
 async fn api_ai_check(State(s): State<Shared>) -> Json<Value> {
     let st = ai::load_settings(&lock(&s));
-    let (running, has) = tokio::task::spawn_blocking(move || ai::check(&st)).await.unwrap_or((false, false));
+    let (running, has) = tokio::task::spawn_blocking(move || ai::ensure_running(&st, 12)).await.unwrap_or((false, false));
     Json(json!({ "running": running, "model_installed": has }))
 }
 /// Load the model into memory when the user starts typing a card. Answers at once.

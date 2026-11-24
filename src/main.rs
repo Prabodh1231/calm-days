@@ -18,6 +18,11 @@ async fn main() {
         }
         let _ = db.set_meta("seeded", "1");
     }
+    // Start Ollama (if needed) and load the model in the background, so the AI is ready for the first sentence.
+    let st = calm_days::ai::load_settings(&db);
+    if st.on {
+        std::thread::spawn(move || calm_days::ai::warm(&st));
+    }
     let shared = Arc::new(Mutex::new(db));
     web::spawn_scheduler(shared.clone());
     // Local only: never 0.0.0.0.

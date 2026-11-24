@@ -137,9 +137,40 @@ pub fn check(s: &Settings) -> (bool, bool) {
     }
 }
 
+/// Make sure Ollama is running: if not, start `ollama serve` hidden and wait up to `wait_secs`.
+/// Only for the default local address. Returns (running, model installed).
+pub fn ensure_running(s: &Settings, wait_secs: u64) -> (bool, bool) {
+    let first = check(s);
+    if first.0 || local_host_port(&s.url).as_deref() != local_host_port(DEFAULT_URL).as_deref() {
+        return first;
+    }
+    let mut cmd = std::process::Command::new("ollama");
+    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000 | 0x0000_0008); // no window, detached
+    }
+    if cmd.spawn().is_err() {
+        return first; // Ollama is not installed
+    }
+    let end = Instant::now() + StdDuration::from_secs(wait_secs);
+    while Instant::now() < end {
+        std::thread::sleep(StdDuration::from_millis(500));
+        let r = check(s);
+        if r.0 {
+            return r;
+        }
+    }
+    check(s)
+}
+
 /// Load the model into memory ahead of the first sentence (empty chat, no answer). Best effort.
 pub fn warm(s: &Settings) {
     if let Some(hp) = local_host_port(&s.url) {
+        if !ensure_running(s, 15).0 {
+            return;
+        }
         let b = json!({ "model": s.model, "messages": [], "stream": false, "keep_alive": KEEP_ALIVE, "options": { "num_ctx": 2048 } }).to_string();
         let _ = http(&hp, "POST", "/api/chat", Some(&b), Instant::now() + StdDuration::from_secs(60));
     }
