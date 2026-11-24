@@ -6,7 +6,8 @@
 //! * A bare time with no am/pm: 1-6 means PM, 7-11 means AM ("at 5" = 5 PM, "at 9" = 9 AM).
 //! * A bare time that has already passed today moves to tomorrow. "today at 9 AM" stays today.
 //! * "midnight" = the start of the next day. "noon" = 12:00.
-//! * "Friday" = the coming Friday (today if it is Friday). "next Friday" = Friday of next week.
+//! * "Friday" = the coming Friday (today if it is Friday). "next Friday" = the coming Friday when it is 3 or more days away,
+//!   otherwise the one after (Tue 24 Nov: next Friday = 27 Nov. Fri 27 Nov: next Friday = 4 Dec).
 //! * "31st" in a short month = the last day of that month. "Feb 29" waits for the next leap year.
 use crate::repeat::{self, Repeat};
 use chrono::{Datelike, Duration, Months, NaiveDate, NaiveDateTime, NaiveTime};
@@ -311,7 +312,8 @@ impl P {
     }
     fn next_week_weekday(&self, wd: u8) -> Option<NaiveDate> {
         let cur = self.today.weekday().num_days_from_monday() as i64;
-        add_days(self.today, 7 - cur + wd as i64)
+        let ahead = (wd as i64 - cur + 7) % 7;
+        add_days(self.today, if ahead >= 3 { ahead } else { ahead + 7 })
     }
     /// Next month/day on or after today (looks ahead 8 years so Feb 29 works).
     fn next_md(&self, m: u32, d: u32) -> Option<NaiveDate> {
@@ -923,10 +925,16 @@ mod tests {
 
     #[test]
     fn weekdays_this_next_and_today_is_that_day() {
-        // Monday now. Friday = 27th, next Friday = 4 Dec
+        // Monday now. Friday = 27th. Next Friday is 4 days away, so it is the 27th too
         assert_eq!(p("report friday").date, Some(d(2026, 11, 27)));
         assert_eq!(p("report this friday").date, Some(d(2026, 11, 27)));
-        assert_eq!(p("report next friday").date, Some(d(2026, 12, 4)));
+        assert_eq!(p("report next friday").date, Some(d(2026, 11, 27)));
+        // Tuesday 24th: Friday is 3 days away, so next Friday is the 27th. Wednesday 25th: only 2 days away, so 4 Dec
+        let tue = d(2026, 11, 24).and_hms_opt(10, 0, 0).unwrap();
+        let wed = d(2026, 11, 25).and_hms_opt(10, 0, 0).unwrap();
+        assert_eq!(p_at("report next friday", tue).date, Some(d(2026, 11, 27)));
+        assert_eq!(p_at("report next friday", wed).date, Some(d(2026, 12, 4)));
+        assert_eq!(p_at("report friday", wed).date, Some(d(2026, 11, 27)));
         // Friday 2026-11-27 now
         let fri = d(2026, 11, 27).and_hms_opt(10, 0, 0).unwrap();
         assert_eq!(p_at("report friday", fri).date, Some(d(2026, 11, 27)));

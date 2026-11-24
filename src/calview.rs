@@ -140,7 +140,7 @@ fn month_view(items: &[&Item], date: NaiveDate, today: NaiveDate) -> String {
             .take(3)
             .map(|i| {
                 let t = if i.has_time { format!("<span class=\"mt\">{}</span> ", i.at_local().map(|a| a.format("%-I:%M").to_string()).unwrap_or_default()) } else { String::new() };
-                format!("<div class=\"mpill pdrag {}\" data-id=\"{}\" data-hm=\"{hm}\" tabindex=\"0\" role=\"button\" title=\"{t2}\" aria-label=\"Open card: {t2}\">{t}{t2}</div>", color(i), i.id, hm = if i.has_time { i.at_local().map(|a| a.format("%H:%M").to_string()).unwrap_or_default() } else { String::new() }, t2 = esc(&i.title))
+                format!("<div class=\"mpill pdrag {}\" data-id=\"{}\" data-hm=\"{hm}\" tabindex=\"0\" role=\"button\" title=\"{tip}\" aria-label=\"Open card: {t2}\">{t}{t2}</div>", color(i), i.id, tip = esc(&format!("{}, {}", i.title, range_text(i))), hm = if i.has_time { i.at_local().map(|a| a.format("%H:%M").to_string()).unwrap_or_default() } else { String::new() }, t2 = esc(&i.title))
             })
             .collect();
         let more = if mine.len() > 3 { format!("<a class=\"mmore\" href=\"{}\">+{} more</a>", link("day", d), mine.len() - 3) } else { String::new() };
@@ -178,7 +178,7 @@ fn time_grid(items: &[&Item], first: NaiveDate, days: i64, today: NaiveDate, now
         let pills: String = mine
             .iter()
             .filter(|i| !i.has_time)
-            .map(|i| format!("<div class=\"adpill pdrag {}\" data-id=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"Open card: {t}\">{t}</div>", color(i), i.id, t = esc(&i.title)))
+            .map(|i| format!("<div class=\"adpill pdrag {}\" data-id=\"{}\" tabindex=\"0\" role=\"button\" title=\"{t}, All day\" aria-label=\"Open card: {t}\">{t}</div>", color(i), i.id, t = esc(&i.title)))
             .collect();
         allday.push_str(&format!("<div class=\"adcell\" data-date=\"{}\">{pills}</div>", ds(d)));
         let timed: Vec<&Item> = mine.iter().copied().filter(|i| i.has_time).collect();
@@ -196,10 +196,12 @@ fn time_grid(items: &[&Item], first: NaiveDate, days: i64, today: NaiveDate, now
             let Some(&(_, s, e)) = ev.iter().find(|x| x.0 == i.id) else { continue };
             let Some(&(_, col, n)) = lay.iter().find(|x| x.0 == i.id) else { continue };
             let w = 100.0 / n as f64;
-            let short = if e - s <= 30 { " short" } else { "" };
+            let short = if e - s <= 45 { " short" } else { "" };
+            let tip = esc(&format!("{}, {}", i.title, range_text(i)));
+            let sub = if short.is_empty() { esc(&range_text(i)) } else { esc(&format!(", {}", i.at_local().map(|a| tlabel(a.time())).unwrap_or_default())) };
             let fixed = if i.is_event() { " fx" } else { "" };
             blocks.push_str(&format!(
-                "<div class=\"evb pdrag {c}{short}{fixed}\" data-id=\"{id}\" data-dur=\"{dur}\" data-start=\"{s}\" tabindex=\"0\" role=\"button\" aria-label=\"Open card: {t}, {r}\" style=\"top:calc(var(--hh)*{top:.4});height:calc(var(--hh)*{hh:.4} - 2px);left:{l:.3}%;width:calc({w:.3}% - 3px)\"><b class=\"evt\">{t}</b><span class=\"evtime\">{r}</span><i class=\"rz\" title=\"Drag to change the length\" aria-hidden=\"true\"></i></div>",
+                "<div class=\"evb pdrag {c}{short}{fixed}\" data-id=\"{id}\" data-dur=\"{dur}\" data-start=\"{s}\" tabindex=\"0\" role=\"button\" title=\"{tip}\" aria-label=\"Open card: {t}, {r}\" style=\"top:calc(var(--hh)*{top:.4});height:max(22px, calc(var(--hh)*{hh:.4} - 2px));left:{l:.3}%;width:calc({w:.3}% - 3px)\"><b class=\"evt\">{t}</b><span class=\"evtime\">{sub}</span><i class=\"rz\" title=\"Drag to change the length\" aria-hidden=\"true\"></i></div>",
                 c = color(i),
                 id = i.id,
                 dur = i.dur_min,
@@ -240,11 +242,12 @@ fn agenda_view(items: &[&Item], loose: &[&Item], date: NaiveDate, today: NaiveDa
             mine.iter()
                 .map(|i| {
                     format!(
-                        "<li class=\"ag-item pdrag {}\" data-id=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"Open card: {t}\"><span class=\"ag-time\">{}</span><span class=\"ag-title\">{t}</span></li>",
+                        "<li class=\"ag-item pdrag {}\" data-id=\"{}\" tabindex=\"0\" role=\"button\" title=\"{t}, {r}\" aria-label=\"Open card: {t}\"><span class=\"ag-time\">{}</span><span class=\"ag-title\">{t}</span></li>",
                         color(i),
                         i.id,
                         esc(&if i.has_time { range_text(i) } else { "All day".into() }),
-                        t = esc(&i.title)
+                        t = esc(&i.title),
+                        r = esc(&if i.has_time { range_text(i) } else { "All day".into() })
                     )
                 })
                 .collect()
@@ -382,12 +385,27 @@ mod tests {
     fn week_blocks_have_position_length_and_share_width_when_they_overlap() {
         let items = vec![item(1, "A", 24, Some((9, 0)), 60, "red"), item(2, "B", 24, Some((9, 30)), 60, ""), item(3, "C", 25, Some((14, 0)), 45, "blue")];
         let h = calendar_page("b", &items, "week", today(), now());
-        assert!(h.contains("top:calc(var(--hh)*9.0000);height:calc(var(--hh)*1.0000 - 2px);left:0.000%;width:calc(50.000% - 3px)"), "{h}");
+        assert!(h.contains("top:calc(var(--hh)*9.0000);height:max(22px, calc(var(--hh)*1.0000 - 2px));left:0.000%;width:calc(50.000% - 3px)"), "{h}");
         assert!(h.contains("left:50.000%"));
-        assert!(h.contains("height:calc(var(--hh)*0.7500 - 2px);left:0.000%;width:calc(100.000% - 3px)"));
+        assert!(h.contains("height:max(22px, calc(var(--hh)*0.7500 - 2px));left:0.000%;width:calc(100.000% - 3px)"));
         assert!(h.contains("class=\"nowline\"") && h.contains("class=\"tg-allday\""));
         assert!(h.contains("data-dur=\"60\"") && h.contains("<i class=\"rz\""));
         assert_eq!(h.matches("class=\"dcol").count(), 7);
+    }
+
+    #[test]
+    fn short_blocks_keep_their_start_get_a_one_line_label_and_every_view_has_a_tooltip() {
+        let items = vec![item(1, "Call John", 24, Some((17, 0)), 15, ""), item(2, "Long one", 24, Some((9, 0)), 90, "")];
+        let h = calendar_page("b", &items, "week", today(), now());
+        assert!(h.contains("evb pdrag c-none short") && h.contains("top:calc(var(--hh)*17.0000);height:max(22px, calc(var(--hh)*0.2500 - 2px))"), "{h}");
+        assert!(h.contains("<b class=\"evt\">Call John</b><span class=\"evtime\">, 5:00 PM</span>"));
+        assert!(h.contains("<span class=\"evtime\">9:00 AM - 10:30 AM</span>"), "long blocks keep the range");
+        for v in ["week", "day", "month", "agenda"] {
+            let h = calendar_page("b", &items, v, today(), now());
+            assert!(h.contains("title=\"Call John, 5:00 PM - 5:15 PM\""), "{v}");
+        }
+        let all = vec![item(3, "Pay rent", 24, None, 30, "")];
+        assert!(calendar_page("b", &all, "week", today(), now()).contains("title=\"Pay rent, All day\""));
     }
 
     #[test]

@@ -109,7 +109,7 @@ async fn index(State(s): State<Shared>) -> Html<String> {
     let now = now_local();
     let lists = db.lists(false).unwrap_or_default();
     let cards: Vec<Item> = lists.iter().flat_map(|l| db.cards_in(l.id).unwrap_or_default()).collect();
-    let pending = db.pending_proposals().map(|v| v.len()).unwrap_or(0);
+    let pending = ops::waiting_plans(&db).len();
     Html(view::board_page(&board_name(&db), &lists, &cards, pending, now))
 }
 
@@ -123,7 +123,7 @@ async fn calendar(State(s): State<Shared>, Query(q): Query<HashMap<String, Strin
 
 async fn plan_page(State(s): State<Shared>) -> Html<String> {
     let db = lock(&s);
-    Html(view::plan_page(&board_name(&db), &db.pending_proposals().unwrap_or_default(), &db.recent_undo(10).unwrap_or_default(), now_local()))
+    Html(view::plan_page(&board_name(&db), &ops::waiting_plans(&db), &db.recent_undo(10).unwrap_or_default(), now_local()))
 }
 
 async fn summary(State(s): State<Shared>) -> Html<String> {

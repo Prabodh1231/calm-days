@@ -89,7 +89,7 @@ textarea{width:100%;resize:vertical}
 .addlist>button{background:transparent;border:0;text-align:left;color:#fff;font-weight:600;text-shadow:0 1px 2px rgba(0,0,0,.45)}
 #addlist-form input{width:100%;margin-bottom:6px}
 /* card panel */
-#panel{position:fixed;top:0;right:0;bottom:0;width:min(440px,100%);background:var(--card);color:var(--ink);z-index:20;box-shadow:-8px 0 24px rgba(0,0,0,.3);overflow-y:auto;padding:14px 16px 40px}
+#panel{position:fixed;top:0;right:0;bottom:0;width:min(440px,100%);background:var(--card);color:var(--ink);z-index:20;box-shadow:-8px 0 24px rgba(0,0,0,.3);overflow-y:auto;padding:14px 16px 0}
 #panel[hidden]{display:none}
 #panel label{display:block;font-size:.8rem;color:var(--muted);margin:10px 0 2px}
 #panel input[type=text],#panel input[type=date],#panel input[type=time],#panel input[type=number],#panel select,#panel textarea{width:100%}
@@ -105,7 +105,9 @@ textarea{width:100%;resize:vertical}
 .chkrow.done input[type=text]{text-decoration:line-through;color:var(--muted)}
 .bar2{height:6px;border-radius:3px;background:var(--list);overflow:hidden;margin:4px 0}
 .bar2>i{display:block;height:100%;background:var(--lo)}
-.panelfoot{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+.panelfoot{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;position:sticky;bottom:0;background:var(--card);padding:10px 0 14px;border-top:1px solid var(--cal-line);z-index:2}
+.discard{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;padding:8px 10px;border-radius:8px;background:var(--warnbg);color:var(--warn)}
+.discard b{flex:1 1 100%}
 /* shared pages */
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:12px 0}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row.between{justify-content:space-between}
@@ -271,7 +273,10 @@ body.cal-page main{max-width:none;padding:0}
 .dcol{position:relative;border-left:1px solid var(--cal-line);background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(var(--hh) - 1px),var(--cal-line) calc(var(--hh) - 1px),var(--cal-line) var(--hh));min-width:0}
 .dcol.today{background-color:color-mix(in srgb,var(--accent) 4%,transparent)}
 .evb{position:absolute;border-radius:8px;padding:3px 6px;font-size:.78rem;overflow:hidden;cursor:grab;user-select:none;-webkit-user-select:none;box-shadow:0 1px 2px rgba(0,0,0,.12);display:flex;flex-direction:column;line-height:1.25}
-.evb.short{flex-direction:row;gap:6px;align-items:center;white-space:nowrap}
+.evb.short{flex-direction:row;gap:0;align-items:center;white-space:nowrap;padding:0 6px;font-size:.74rem;line-height:1.1}
+.evb.short .evt{flex:0 1 auto;min-width:2.5em}
+.evb.short .evtime{font-size:.72rem;flex:0 100 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;margin-right:auto}
+.evb:hover,.evb:focus-visible{z-index:5}
 .evb .evt{overflow:hidden;text-overflow:ellipsis;font-weight:600}
 .evb .evtime{color:var(--muted);font-size:.7rem;white-space:nowrap}
 .evb.fx{border-left-width:6px}
@@ -289,7 +294,7 @@ body.cal-dragging{cursor:grabbing;user-select:none}
 .ag-day.today h2{color:var(--accent)}
 .ag-day ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
 .ag-item{display:flex;gap:12px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--cc,var(--c-none)) 14%,var(--card))}
-.ag-time{flex:0 0 120px;color:var(--muted);font-size:.85rem}
+.ag-time{flex:0 0 auto;min-width:120px;white-space:nowrap;color:var(--muted);font-size:.85rem}
 .ag-title{font-weight:500}
 .ag-empty{color:var(--muted);font-size:.9rem;padding:2px 4px}
 .today-tag{background:var(--accent);color:var(--accent-ink)}
@@ -303,7 +308,7 @@ body.cal-dragging{cursor:grabbing;user-select:none}
   .tg{min-width:620px}
   .mcell{min-height:64px;padding:2px}
   .mpill{font-size:.62rem;padding:0 2px}.mpill .mt{display:none}
-  .ag-time{flex-basis:96px}
+  .ag-time{min-width:0;font-size:.78rem}
   #cmdk-btn kbd{display:none}
 }
 

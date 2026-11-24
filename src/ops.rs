@@ -479,8 +479,19 @@ pub fn submit_edit(db: &Db, id: i64, title: Option<String>, priority: Option<i64
 }
 
 /// The gate: ask `needs_approval`; write only when it says no.
+/// Proposals the user reviews on the Daily planner page (suggested plans). Move, archive and delete questions are asked in a dialog at once, so they never count as waiting.
+pub fn waiting_plans(db: &Db) -> Vec<(i64, Change)> {
+    db.pending_proposals().unwrap_or_default().into_iter().filter(|(_, c)| matches!(c, Change::Plan { .. })).collect()
+}
+
 fn dispatch(db: &Db, change: Change, now: NaiveDateTime) -> Res<Outcome> {
     if needs_approval(&change) {
+        // a dialog question is answered at once: a question nobody answered (page closed) is dropped, not kept waiting
+        for (pid, c) in db.pending_proposals().map_err(e)? {
+            if !matches!(c, Change::Plan { .. }) {
+                db.set_proposal_status(pid, "cancelled").map_err(e)?;
+            }
+        }
         Ok(Outcome::Proposal(db.add_proposal(&change, to_utc(now)).map_err(e)?))
     } else {
         Ok(Outcome::Applied(apply(db, &change, now)?))
@@ -674,16 +685,16 @@ pub fn load_sample(db: &Db, now: NaiveDateTime) -> Res<usize> {
     let ck = |v: &[(&str, bool)]| v.iter().map(|(t, d)| Check { t: t.to_string(), d: *d }).collect::<Vec<_>>();
     // (card, list, labels, notes, checklist)
     let list: Vec<(NewItem, i64, &str, &str, Vec<Check>)> = vec![
-        (mk("Pay electricity bill", false, Some(day(-1)), None, 15, 2, None), todo, "red", "Account number is on the paper bill.", vec![]),
+        (mk("Pay electricity bill", false, Some(day(-1)), None, 30, 2, None), todo, "red", "Account number is on the paper bill.", vec![]),
         (mk("Send project report", false, Some(day(2)), None, 90, 2, None), todo, "purple,blue", "Send to the team before the meeting.", ck(&[("Write summary", true), ("Add charts", false), ("Email it", false)])),
         (mk("Buy groceries", false, Some(today), None, 45, 0, None), todo, "green", "", ck(&[("Milk", false), ("Bread", false), ("Apples", false)])),
-        (mk("Call John", false, Some(day(1)), t(17, 0), 15, 1, None), todo, "yellow", "", vec![]),
+        (mk("Call John", false, Some(day(1)), t(17, 0), 30, 1, None), todo, "yellow", "", vec![]),
         (mk("Dentist appointment", true, Some(day(1)), t(16, 30), 60, 1, None), todo, "orange", "A fixed event: the planner will not move it.", vec![]),
         (mk("Read 20 pages", false, None, None, 30, 0, None), todo, "", "", vec![]),
-        (mk("Water the plants", false, Some(today), t(20, 0), 10, 1, Some(Repeat::Daily(1))), doing, "green", "", vec![]),
+        (mk("Water the plants", false, Some(today), t(20, 0), 30, 1, Some(Repeat::Daily(1))), doing, "green", "", vec![]),
         (mk("Weekly review", false, Some(today + Duration::days((4 - today.weekday().num_days_from_monday() as i64 + 7) % 7)), t(16, 0), 30, 1, Some(Repeat::Weekly { every: 1, days: vec![4] })), doing, "blue", "", ck(&[("Check the board", true), ("Plan next week", false)])),
         (mk("Lunch with Maya", true, Some(today), t(13, 0), 60, 1, None), doing, "orange", "", vec![]),
-        (mk("Book the dentist", false, None, None, 10, 1, None), done, "", "", vec![]),
+        (mk("Book the dentist", false, None, None, 30, 1, None), done, "", "", vec![]),
     ];
     let n = list.len();
     for (x, lid, labels, notes, checks) in list {
@@ -784,6 +795,27 @@ mod tests {
         cancel(&db, p).unwrap();
         assert!(approve(&db, p, now()).is_err());
         assert!(!db.get(a.id).unwrap().unwrap().has_time);
+    }
+
+    #[test]
+    fn cancelled_or_forgotten_questions_leave_no_waiting_banner() {
+        let db = Db::memory().unwrap();
+        let ev = task(&db, "Dentist", Some(24), Some(10), true);
+        let Outcome::Proposal(p) = submit_delete(&db, &[ev.id], now()).unwrap() else { panic!("asks first") };
+        assert_eq!(db.pending_proposals().unwrap().len(), 1);
+        cancel(&db, p).unwrap();
+        assert!(db.pending_proposals().unwrap().is_empty(), "cancel discards it on the server");
+        assert!(waiting_plans(&db).is_empty());
+        // a question left unanswered (tab closed) never shows as waiting, and the next question drops it
+        let Outcome::Proposal(q) = submit_delete(&db, &[ev.id], now()).unwrap() else { panic!("asks first") };
+        assert!(waiting_plans(&db).is_empty());
+        let Outcome::Proposal(_) = submit_delete(&db, &[ev.id], now()).unwrap() else { panic!("asks first") };
+        assert_eq!(db.get_proposal(q).unwrap().unwrap().1, "cancelled");
+        assert_eq!(db.pending_proposals().unwrap().len(), 1);
+        // a suggested plan is the one thing that does wait for review
+        task(&db, "Report", Some(25), None, false);
+        make_plan(&db, now(), false).unwrap().unwrap();
+        assert_eq!(waiting_plans(&db).len(), 1);
     }
 
     #[test]

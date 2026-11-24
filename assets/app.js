@@ -222,6 +222,16 @@
   // ---- card detail panel ----
   var panel = $('#panel'), panelId = null;
   var panelIdRef = null;
+  // Close with unsaved edits asks first (a bar above the buttons); Keep editing leaves everything as it was.
+  function askDiscard() {
+    if ($('.discard', panel)) { return; }
+    var keep = el('button', { type: 'button', text: 'Keep editing' }), drop = el('button', { type: 'button', class: 'danger', text: 'Discard' });
+    keep.addEventListener('click', function () { $('.discard', panel).remove(); });
+    drop.addEventListener('click', closePanel);
+    var bar = el('div', { class: 'discard', role: 'alert' }, [el('b', { text: 'Discard changes?' }), keep, drop]);
+    panel.insertBefore(bar, $('.panelfoot', panel));
+    keep.focus();
+  }
   function closePanel() { panel.hidden = true; panel.textContent = ''; panelId = null; }
   var LABELS = ['green', 'yellow', 'orange', 'red', 'purple', 'blue'];
   function field(label, input, id) {
@@ -238,7 +248,7 @@
     panelId = c.id;
     panel.textContent = '';
     var closeB = el('button', { type: 'button', text: 'Close', 'aria-label': 'Close card details' });
-    closeB.addEventListener('click', closePanel);
+    closeB.addEventListener('click', function () { if (panel._dirty && panel._dirty()) { askDiscard(); } else { closePanel(); } });
     panel.appendChild(el('h2', {}, [el('span', {}, [el('span', { class: 'cid', text: c.cid }), el('span', { text: c.done ? ' Card (done)' : ' Card' })]), closeB]));
     var main = el('div', { class: 'pmain' }), side = el('aside', { class: 'pside', 'aria-label': 'Properties' });
     panel.appendChild(el('div', { class: 'pgrid' }, [main, side]));
@@ -358,6 +368,9 @@
       }).catch(fail);
     });
     panel.appendChild(el('div', { class: 'panelfoot' }, [save, arch, del]));
+    function snap() { return JSON.stringify([title.value, notes.value, pri.value, date.value, time.value, rem.value, rep.value, until.value, kind.checked, dur.value, cyc.value, chosen.slice().sort(), checks, ls.value, ps.value]); }
+    var snap0 = snap();
+    panel._dirty = function () { return snap() !== snap0; };
     panel.hidden = false;
     title.focus();
   }
