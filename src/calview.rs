@@ -156,6 +156,25 @@ fn month_view(items: &[&Item], date: NaiveDate, today: NaiveDate) -> String {
     out
 }
 
+/// Groups of blocks that overlap in time, chained (A overlaps B, B overlaps C = one group).
+fn overlap_clusters(ev: &[(i64, i64, i64)]) -> Vec<Vec<i64>> {
+    let mut sorted = ev.to_vec();
+    sorted.sort_by_key(|e| (e.1, e.2, e.0));
+    let mut out: Vec<Vec<i64>> = Vec::new();
+    let mut end = i64::MIN;
+    for (id, s, e) in sorted {
+        if s >= end || out.is_empty() {
+            out.push(Vec::new());
+            end = e;
+        }
+        end = end.max(e);
+        if let Some(c) = out.last_mut() {
+            c.push(id);
+        }
+    }
+    out
+}
+
 fn time_grid(items: &[&Item], first: NaiveDate, days: i64, today: NaiveDate, now: NaiveDateTime) -> String {
     let mut head = String::from("<div class=\"tg-corner\"></div>");
     let mut allday = String::from("<div class=\"tg-label\">all-day</div>");
@@ -191,17 +210,43 @@ fn time_grid(items: &[&Item], first: NaiveDate, days: i64, today: NaiveDate, now
             })
             .collect();
         let lay = layout_columns(&ev);
+        // Week view only: at most 2 side-by-side columns (1 on a phone, by CSS); the rest become a "+N" chip.
+        let cap = if days > 1 { 2 } else { usize::MAX };
         let mut blocks = String::new();
+        let mut chips = String::new();
+        if days > 1 {
+            for ids in overlap_clusters(&ev) {
+                let col_of = |id: i64| lay.iter().find(|x| x.0 == id).map_or(0, |x| x.1);
+                let start_of = |id: i64| ev.iter().find(|x| x.0 == id).map_or(0, |x| x.1);
+                let hid = |min_col: usize| ids.iter().copied().filter(|&id| col_of(id) >= min_col).collect::<Vec<_>>();
+                for (min_col, cls) in [(2usize, "mored"), (1usize, "morep")] {
+                    let h = hid(min_col);
+                    if let Some(top) = h.iter().map(|&id| start_of(id)).min() {
+                        chips.push_str(&format!(
+                            "<a class=\"more {cls}\" href=\"{}\" style=\"top:calc(var(--hh)*{:.4})\" title=\"{n} more at this time. Open the day.\" aria-label=\"{n} more at this time. Open the day.\">+{n}<span class=\"mw\"> more</span></a>",
+                            link("day", d),
+                            top as f64 / 60.0,
+                            n = h.len()
+                        ));
+                    }
+                }
+            }
+        }
         for i in &timed {
             let Some(&(_, s, e)) = ev.iter().find(|x| x.0 == i.id) else { continue };
             let Some(&(_, col, n)) = lay.iter().find(|x| x.0 == i.id) else { continue };
-            let w = 100.0 / n as f64;
+            if col >= cap {
+                continue;
+            }
+            let w = 100.0 / n.min(cap) as f64;
+            let more = if days > 1 && col >= 1 { " h1" } else { "" };
+            
             let short = if e - s <= 45 { " short" } else { "" };
             let tip = esc(&format!("{}, {}", i.title, range_text(i)));
             let sub = if short.is_empty() { esc(&range_text(i)) } else { esc(&format!("{}", i.at_local().map(|a| tlabel(a.time())).unwrap_or_default())) };
             let fixed = if i.is_event() { " fx" } else { "" };
             blocks.push_str(&format!(
-                "<div class=\"evb pdrag {c}{short}{fixed}\" data-id=\"{id}\" data-dur=\"{dur}\" data-start=\"{s}\" tabindex=\"0\" role=\"button\" title=\"{tip}\" aria-label=\"Open card: {t}, {r}\" style=\"top:calc(var(--hh)*{top:.4});height:max(22px, calc(var(--hh)*{hh:.4} - 2px));left:{l:.3}%;width:calc({w:.3}% - 3px)\"><b class=\"evt\">{t}</b><span class=\"evtime\">{sub}</span><i class=\"rz\" title=\"Drag to change the length\" aria-hidden=\"true\"></i></div>",
+                "<div class=\"evb pdrag {c}{short}{fixed}{more}\" data-id=\"{id}\" data-dur=\"{dur}\" data-start=\"{s}\" tabindex=\"0\" role=\"button\" title=\"{tip}\" aria-label=\"Open card: {t}, {r}\" style=\"top:calc(var(--hh)*{top:.4});height:max(22px, calc(var(--hh)*{hh:.4} - 2px));left:{l:.3}%;width:calc({w:.3}% - 3px)\"><b class=\"evt\">{t}</b><span class=\"evtime\">{sub}</span><i class=\"rz\" title=\"Drag to change the length\" aria-hidden=\"true\"></i></div>",
                 c = color(i),
                 id = i.id,
                 dur = i.dur_min,
@@ -218,7 +263,7 @@ fn time_grid(items: &[&Item], first: NaiveDate, days: i64, today: NaiveDate, now
         } else {
             String::new()
         };
-        cols.push_str(&format!("<div class=\"dcol{tcls}\" data-date=\"{}\">{nowline}{blocks}</div>", ds(d)));
+        cols.push_str(&format!("<div class=\"dcol{tcls}\" data-date=\"{}\">{nowline}{blocks}{chips}</div>", ds(d)));
     }
     format!(
         "<div class=\"tg-wrap\"><div class=\"tg\" style=\"--n:{days}\"><div class=\"tg-head\">{head}</div><div class=\"tg-allday\">{allday}</div><div class=\"tg-scroll\" id=\"tg-scroll\"><div class=\"tg-body\">{cols}</div></div></div></div>"
@@ -379,6 +424,18 @@ mod tests {
         assert!(h.contains("+2 more"));
         assert!(h.contains("c-green"));
         assert!(h.contains("data-date=\"2026-11-24\""));
+    }
+
+    #[test]
+    fn week_caps_columns_at_two_and_adds_a_more_chip() {
+        let items = vec![item(1, "A", 24, Some((11, 0)), 45, ""), item(2, "B", 24, Some((11, 0)), 45, ""), item(3, "C", 24, Some((11, 0)), 45, ""), item(4, "D", 24, Some((11, 0)), 45, "")];
+        let w = calendar_page("b", &items, "week", today(), now());
+        assert_eq!(w.matches("class=\"evb ").count(), 2, "only two blocks are drawn");
+        assert!(w.contains("class=\"more mored\"") && w.contains("+2<span"));
+        assert!(w.contains("class=\"more morep\"") && w.contains("+3<span"));
+        let d = calendar_page("b", &items, "day", today(), now());
+        assert_eq!(d.matches("class=\"evb ").count(), 4, "the day view shows every block");
+        assert!(!d.contains("class=\"more "));
     }
 
     #[test]

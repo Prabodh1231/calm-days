@@ -92,7 +92,6 @@
     if (res.status === 'proposal' && location.pathname !== '/plan') {
       return confirmProposal(res.proposal);
     } else if (res.status === 'proposal') {
-      sessionStorage.setItem('toast', JSON.stringify({ msg: res.message, undo: 0 }));
       location.href = '/plan';
     } else if (res.status === 'none') {
       toast(res.message);

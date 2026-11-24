@@ -368,3 +368,24 @@ body.cal-dragging{cursor:grabbing;user-select:none}
 [data-theme=dark] .md.today{background:var(--accent);color:var(--accent-ink)}
 .tg-hours span{white-space:nowrap}
 @media (max-width:760px){.tg-head,.tg-allday,.tg-body{grid-template-columns:52px repeat(var(--n),minmax(0,1fr))}.tg-hours span{right:4px;font-size:.62rem}}
+
+/* ===== layout fix 2 ===== */
+/* week: at most 2 side-by-side blocks (1 on a phone); the rest is a "+N" chip that opens the day */
+.more{position:absolute;right:3px;transform:translateY(-90%);z-index:7;font-size:.66rem;font-weight:700;line-height:1;padding:3px 6px;border-radius:999px;background:var(--accent);color:var(--accent-ink);text-decoration:none;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.more .mw{display:none}
+.more.morep{display:none}
+@media (min-width:1100px){.more .mw{display:inline}}
+@media (max-width:760px){
+  .more.mored{display:none}
+  .more.morep{display:block}
+  .tg[style*="--n:7"] .evb{left:0!important;width:calc(100% - 3px)!important}
+  .tg[style*="--n:7"] .evb.h1{display:none}
+}
+/* no breaking inside a word unless a single word is wider than the block */
+.evb .evt{overflow-wrap:normal;word-break:normal;hyphens:manual}
+@container (max-width:110px){.evb .evt{font-size:.62rem;letter-spacing:-.02em}.evb{padding-left:4px;padding-right:2px}}
+/* first hour label is no longer cut off by the all-day row */
+.tg-scroll{padding-top:10px}
+/* toast: the Undo button is readable in both themes */
+#toast button{background:#fff;color:#14171b;border:1px solid #9aa5b1;font-weight:600}
+[data-theme=dark] #toast button{background:#14171b;color:#fff;border-color:#14171b}
