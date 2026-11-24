@@ -614,14 +614,15 @@
     var b = $('#banner');
     b.textContent = '';
     if (!list.length) { return; }
-    b.appendChild(el('div', { text: list.length === 1 ? '1 reminder:' : list.length + ' reminders:' }));
+    var head = el('div', { class: 'bn-head' });
+    head.appendChild(el('b', { text: list.length === 1 ? '1 reminder' : list.length + ' reminders' }));
     var ul = el('ul');
     list.forEach(function (d) { ul.appendChild(el('li', { text: d.title + (d.when ? ' (' + d.when + ')' : '') })); });
-    var btn = el('button', { type: 'button', text: 'Dismiss' });
+    var btn = el('button', { type: 'button', class: 'small', text: 'Dismiss' });
     btn.addEventListener('click', function () {
       api('/api/due/ack', { ids: list.map(function (d) { return d.id; }) }).then(poll).catch(fail);
     });
-    b.appendChild(ul); b.appendChild(btn);
+    head.appendChild(btn); b.appendChild(head); b.appendChild(ul);
   }
   function poll() {
     api('/api/due').then(function (r) {
@@ -900,6 +901,8 @@
     var sc = $('#tg-scroll'); if (!sc) { return; }
     var n = $('.nowline'), top = 7;
     if (n) { top = Math.max(0, new Date().getHours() - 2); }
+    // never hide the first block of the day: start one hour before the earliest block
+    $$('.evb').forEach(function (b) { top = Math.min(top, Math.max(0, Math.floor((+b.dataset.start || 0) / 60) - 1)); });
     sc.scrollTop = top * hh();
   }
   function tickNow() {

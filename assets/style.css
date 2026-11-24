@@ -326,3 +326,45 @@ body.cal-dragging{cursor:grabbing;user-select:none}
 #ai-dialog{width:440px}
 #ai-status.bad{color:var(--warn)}#ai-status.good{color:var(--lo)}
 .cmdk-prev{display:flex;flex-direction:column;gap:6px;padding:8px 12px;white-space:normal}
+
+/* ===== layout polish ===== */
+/* top bar: buttons never squash into one-letter columns */
+.top button,.top .btn{white-space:nowrap}
+.top .tools{row-gap:6px}
+@media (max-width:600px){
+  .top{gap:4px 8px}
+  .brand{font-size:1rem}
+  .board-name{width:auto;flex:1 1 120px}
+  .top nav{order:3;width:100%}
+  .top nav a{flex:1;text-align:center}
+  .top .tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;gap:6px;order:4}
+  .top .tools>*{margin:0;text-align:center;min-width:0;padding-left:6px;padding-right:6px}
+  .top .tools #cmdk-btn{grid-column:1/-1;justify-content:flex-start}
+  .top .tools #now-btn{grid-column:1/-1}
+}
+/* reminder banner: a short strip, never a third of the screen */
+#banner:not(:empty){padding:8px 14px}
+#banner .bn-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+#banner .bn-head button{margin:0;min-height:30px;padding:2px 12px;font-size:.85rem}
+#banner ul{margin:2px 0 0;padding-left:18px;max-height:5.6em;overflow-y:auto;font-size:.92rem}
+#banner li{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* calendar blocks: titles stay readable, times only when there is room */
+.evb{container-type:inline-size;padding:3px 6px 6px}
+.evb .evt{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;white-space:normal;overflow-wrap:anywhere;line-height:1.2}
+.evb .evtime{display:none;margin-top:1px}
+@container (min-width:96px){.evb .evtime{display:block}}
+.evb.short{padding:0 6px}
+.evb.short .evt{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
+.evb.short .evtime{display:none;margin:0 0 0 8px;flex:0 0 auto}
+@container (min-width:150px){.evb.short .evtime{display:block}}
+.tg-scroll{max-height:max(380px,calc(100vh - 300px))}
+.tg-allday{position:relative;z-index:1;background:var(--card)}
+@container (max-width:80px){.evb .evt{font-size:.68rem;letter-spacing:-.01em;overflow-wrap:break-word;hyphens:auto}.evb{padding-left:4px;padding-right:3px}}
+@media (max-width:760px){.tg{min-width:780px}.tg-head,.tg-allday,.tg-body{grid-template-columns:44px repeat(var(--n),minmax(0,1fr))}}
+@media (max-width:760px){.tg{min-width:0}.tg[style*="--n:7"]{min-width:780px}}
+.board-name{width:min(170px,100%)}
+.intro{max-width:120ch}
+@media (max-width:600px){.board-name{width:auto}}
+[data-theme=dark] .md.today{background:var(--accent);color:var(--accent-ink)}
+.tg-hours span{white-space:nowrap}
+@media (max-width:760px){.tg-head,.tg-allday,.tg-body{grid-template-columns:52px repeat(var(--n),minmax(0,1fr))}.tg-hours span{right:4px;font-size:.62rem}}

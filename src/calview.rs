@@ -198,7 +198,7 @@ fn time_grid(items: &[&Item], first: NaiveDate, days: i64, today: NaiveDate, now
             let w = 100.0 / n as f64;
             let short = if e - s <= 45 { " short" } else { "" };
             let tip = esc(&format!("{}, {}", i.title, range_text(i)));
-            let sub = if short.is_empty() { esc(&range_text(i)) } else { esc(&format!(", {}", i.at_local().map(|a| tlabel(a.time())).unwrap_or_default())) };
+            let sub = if short.is_empty() { esc(&range_text(i)) } else { esc(&format!("{}", i.at_local().map(|a| tlabel(a.time())).unwrap_or_default())) };
             let fixed = if i.is_event() { " fx" } else { "" };
             blocks.push_str(&format!(
                 "<div class=\"evb pdrag {c}{short}{fixed}\" data-id=\"{id}\" data-dur=\"{dur}\" data-start=\"{s}\" tabindex=\"0\" role=\"button\" title=\"{tip}\" aria-label=\"Open card: {t}, {r}\" style=\"top:calc(var(--hh)*{top:.4});height:max(22px, calc(var(--hh)*{hh:.4} - 2px));left:{l:.3}%;width:calc({w:.3}% - 3px)\"><b class=\"evt\">{t}</b><span class=\"evtime\">{sub}</span><i class=\"rz\" title=\"Drag to change the length\" aria-hidden=\"true\"></i></div>",
@@ -398,7 +398,7 @@ mod tests {
         let items = vec![item(1, "Call John", 24, Some((17, 0)), 15, ""), item(2, "Long one", 24, Some((9, 0)), 90, "")];
         let h = calendar_page("b", &items, "week", today(), now());
         assert!(h.contains("evb pdrag c-none short") && h.contains("top:calc(var(--hh)*17.0000);height:max(22px, calc(var(--hh)*0.2500 - 2px))"), "{h}");
-        assert!(h.contains("<b class=\"evt\">Call John</b><span class=\"evtime\">, 5:00 PM</span>"));
+        assert!(h.contains("<b class=\"evt\">Call John</b><span class=\"evtime\">5:00 PM</span>"));
         assert!(h.contains("<span class=\"evtime\">9:00 AM - 10:30 AM</span>"), "long blocks keep the range");
         for v in ["week", "day", "month", "agenda"] {
             let h = calendar_page("b", &items, v, today(), now());
@@ -432,3 +432,4 @@ mod tests {
         assert!(h.contains("Not scheduled yet") && h.contains("Read 20 pages"));
     }
 }
+
